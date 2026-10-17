@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import type { Priority } from '../../src/types'
 
@@ -296,5 +297,46 @@ describe('认证 store', () => {
     await auth.login('alice', 'password123')
     await auth.updateAvatar({ emoji: '🦊', color: '#8b5cf6' })
     expect(auth.user?.avatar).toContain('🦊')
+  })
+})
+
+describe('排序方式持久化（跨会话）', () => {
+  let storageMap: Map<string, string>
+
+  beforeEach(() => {
+    storageMap = new Map()
+    globalThis.localStorage = {
+      getItem: (key: string) => storageMap.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        storageMap.set(key, String(value))
+      },
+      removeItem: (key: string) => {
+        storageMap.delete(key)
+      },
+    } as unknown as Storage
+  })
+
+  afterEach(() => {
+    try {
+      delete (globalThis as { localStorage?: unknown }).localStorage
+    } catch {
+      // 非自有属性时忽略
+    }
+  })
+
+  it('切换排序方式后写入磁盘，新会话读取后保留', async () => {
+    const store = useItemsStore()
+    store.sortMode = 'priority'
+    await nextTick() // watch 回调在微任务时机落盘
+    expect(storageMap.get('tiny-pending-item:sort')).toBe('priority')
+
+    setActivePinia(createPinia()) // 模拟页面刷新后重建 store
+    expect(useItemsStore().sortMode).toBe('priority')
+  })
+
+  it('保存非法值时回退为手动排序', () => {
+    storageMap.set('tiny-pending-item:sort', 'garbage')
+    setActivePinia(createPinia())
+    expect(useItemsStore().sortMode).toBe('manual')
   })
 })

@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { api, type ItemPatch } from '../api/client'
 import type { PendingItem, Priority } from '../types'
@@ -7,14 +7,37 @@ export type SortMode = 'manual' | 'priority'
 
 const PRIORITY_WEIGHT: Record<Priority, number> = { high: 0, medium: 1, low: 2 }
 
+const SORT_KEY = 'tiny-pending-item:sort'
+const SORT_MODES: SortMode[] = ['manual', 'priority']
+
+function readSortMode(): SortMode {
+  try {
+    const raw = localStorage.getItem(SORT_KEY)
+    return SORT_MODES.includes(raw as SortMode) ? (raw as SortMode) : 'manual'
+  } catch {
+    return 'manual'
+  }
+}
+
+function persistSortMode(mode: SortMode): void {
+  try {
+    localStorage.setItem(SORT_KEY, mode)
+  } catch {
+    // 存储不可用时仅保留本次会话的选择（与主题偏好同类处理）
+  }
+}
+
 export const useItemsStore = defineStore('items', () => {
   const items = ref<PendingItem[]>([])
   const filter = ref<string>('all')
   const loading = ref(false)
-  const sortMode = ref<SortMode>('manual')
+  const sortMode = ref<SortMode>(readSortMode())
   const search = ref('')
   const tagFilter = ref('')
   const selectedId = ref<number | null>(null)
+
+  /** 排序方式为跨会话偏好，变化时落盘 */
+  watch(sortMode, (mode) => persistSortMode(mode))
 
   const total = computed(() => items.value.length)
   const remaining = computed(() => items.value.filter((item) => !item.done).length)
@@ -123,9 +146,9 @@ export const useItemsStore = defineStore('items', () => {
   }
 
   function reset(): void {
+    // sortMode 是本地持久化偏好，不随会话重置
     items.value = []
     filter.value = 'all'
-    sortMode.value = 'manual'
     search.value = ''
     tagFilter.value = ''
     selectedId.value = null
