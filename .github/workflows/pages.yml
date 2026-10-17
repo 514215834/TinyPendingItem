@@ -24,8 +24,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: 安装依赖
-        run: npm ci
+      - name: 安装依赖（npm 11 与 lockfile 生成版本一致）
+        run: npm install -g npm@11 && npm ci
       - name: 类型检查
         run: npx vue-tsc --noEmit
       - name: 构建（Pages 子路径）
