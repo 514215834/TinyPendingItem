@@ -6,20 +6,22 @@
  * 校验规则与错误文案对齐 server/items.ts、server/auth.ts。
  *
  * 存储键：
- * - tiny-pending-item:token           会话（JSON {v, uid}，沿用原键名）
- * - tiny-pending-item:local:users     全部本地账号（含口令哈希）
- * - tiny-pending-item:local:items:×   各账号条目（按 userId 分键）
- * - tiny-pending-item:local:seq       递增 id 高水位
+ * - tiny-pending-item:token              会话（JSON {v, uid}，沿用原键名）
+ * - tiny-pending-item:local:users        全部本地账号（含口令哈希）
+ * - tiny-pending-item:local:domains:×    各账号域（按 userId 分键）
+ * - tiny-pending-item:local:items:×      各账号条目（按 userId 分键）
+ * - tiny-pending-item:local:seq          递增 id 高水位
  */
 
-import { PRIORITIES } from '../types'
-import type { PendingItem, Priority, User } from '../types'
+import { DEFAULT_DOMAINS, PRIORITIES } from '../types'
+import type { Domain, PendingItem, Priority, User } from '../types'
 import type { AvatarSpec } from '../utils/avatar'
 
 const TOKEN_KEY = 'tiny-pending-item:token'
 const USERS_KEY = 'tiny-pending-item:local:users'
 const SEQ_KEY = 'tiny-pending-item:local:seq'
 const ITEMS_KEY_PREFIX = 'tiny-pending-item:local:items:'
+const DOMAINS_KEY_PREFIX = 'tiny-pending-item:local:domains:'
 
 const SESSION_VERSION = 1
 const MAX_TITLE = 50
@@ -27,6 +29,8 @@ const MAX_NOTES = 2000
 const MAX_TAGS = 5
 const MAX_TAG_LENGTH = 20
 const MAX_IMPORT = 1000
+const MAX_DOMAIN_NAME = 10
+const MAX_DOMAINS = 20
 
 interface LocalUser {
   id: number
@@ -41,6 +45,13 @@ interface LocalItemRow extends PendingItem {
   sortOrder: number
 }
 
+interface LocalDomainRow {
+  id: number
+  name: string
+  emoji: string
+  sortOrder: number
+}
+
 interface SessionPayload {
   v: number
   uid: number
@@ -49,6 +60,7 @@ interface SessionPayload {
 interface SeqMeta {
   user: number
   item: number
+  domain: number
 }
 
 let unauthorizedHandler: (() => void) | null = null
@@ -169,6 +181,17 @@ function validateAvatarStorage(value: unknown): string | null {
   return JSON.stringify({ emoji, color: color.toLowerCase() })
 }
 
+function validateDomainName(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const name = value.trim()
+  if (!name || name.length > MAX_DOMAIN_NAME) return null
+  return name
+}
+
+function validateDomainEmoji(value: unknown): string | null {
+  return typeof value === 'string' && [...value].length >= 1 && [...value].length <= 4 ? value : null
+}
+
 // ---------------------------------------------------------------------------
 // 读档（容错）：坏掉的行丢弃或填默认值，不让单条脏数据拖垮整个应用
 // ---------------------------------------------------------------------------
@@ -200,6 +223,10 @@ function itemsKey(userId: number): string {
   return `${ITEMS_KEY_PREFIX}${userId}`
 }
 
+function domainsKey(userId: number): string {
+  return `${DOMAINS_KEY_PREFIX}${userId}`
+}
+
 function toLocalItemRow(value: unknown, userId: number): LocalItemRow | null {
   if (!value || typeof value !== 'object') return null
   const record = value as Record<string, unknown>
@@ -207,6 +234,8 @@ function toLocalItemRow(value: unknown, userId: number): LocalItemRow | null {
   return {
     id: record.id,
     userId,
+    // 旧档案没有该字段，读档时由 loadUserData 归入第一个域
+    domainId: typeof record.domainId === 'number' && Number.isInteger(record.domainId) ? record.domainId : 0,
     title: typeof record.title === 'string' ? record.title : '',
     notes: typeof record.notes === 'string' ? record.notes : '',
     done: record.done === true,
@@ -235,6 +264,83 @@ function readItems(userId: number): LocalItemRow[] {
     .filter((value): value is LocalItemRow => value !== null)
 }
 
+function toDomain(row: LocalDomainRow): Domain {
+  return { id: row.id, name: row.name, emoji: row.emoji }
+}
+
+function sortDomainRows(rows: LocalDomainRow[]): LocalDomainRow[] {
+  return [...rows].sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id)
+}
+
+function readDomainRows(userId: number): LocalDomainRow[] {
+  const raw = readJson<unknown[]>(domainsKey(userId))
+  if (!Array.isArray(raw)) return []
+  const rows: LocalDomainRow[] = []
+  for (const value of raw) {
+    if (!value || typeof value !== 'object') continue
+    const record = value as Record<string, unknown>
+    if (typeof record.id !== 'number' || !Number.isInteger(record.id)) continue
+    const name = validateDomainName(record.name)
+    if (!name) continue
+    rows.push({
+      id: record.id,
+      name,
+      emoji: validateDomainEmoji(record.emoji) ?? '📁',
+      sortOrder: typeof record.sortOrder === 'number' && Number.isFinite(record.sortOrder)
+        ? record.sortOrder
+        : 0,
+    })
+  }
+  return rows
+}
+
+/**
+ * 首次访问（新账号或旧档案）时播种内置域：工作、生活、学习。
+ * 之后用户可任意增改删，空列表合法（前提是条目也已清空）。
+ */
+function ensureDomains(userId: number): LocalDomainRow[] {
+  let rows = readDomainRows(userId)
+  if (rows.length > 0) return rows
+  const maxExisting = readJson<SeqMeta>(SEQ_KEY)?.domain ?? 0
+  rows = DEFAULT_DOMAINS.map((preset, index) => ({
+    id: maxExisting + index + 1,
+    name: preset.name,
+    emoji: preset.emoji,
+    sortOrder: index,
+  }))
+  const meta = readJson<Partial<SeqMeta>>(SEQ_KEY) ?? {}
+  writeJson(SEQ_KEY, { user: meta.user ?? 0, item: meta.item ?? 0, domain: maxExisting + rows.length })
+  writeJson(domainsKey(userId), rows)
+  return rows
+}
+
+/** 读档并归位：条目指向已删除/不存在的域时，归入第一个域 */
+function loadUserData(userId: number): { domains: LocalDomainRow[]; rows: LocalItemRow[] } {
+  const domains = ensureDomains(userId)
+  const rows = readItems(userId)
+  const fallback = domains[0].id
+  const valid = new Set(domains.map((row) => row.id))
+  let changed = false
+  for (const row of rows) {
+    if (!valid.has(row.domainId)) {
+      row.domainId = fallback
+      changed = true
+    }
+  }
+  if (changed) writeJson(itemsKey(userId), rows)
+  return { domains, rows }
+}
+
+/** 校验条目归属的域：缺省时归入第一个域，指向他人/已删域时拒绝 */
+function resolveDomainId(domains: LocalDomainRow[], value: unknown): number {
+  if (value === undefined || value === null) return domains[0].id
+  if (typeof value === 'number' && Number.isInteger(value)) {
+    const found = domains.find((row) => row.id === value)
+    if (found) return found.id
+  }
+  throw new ApiError(400, '域不存在')
+}
+
 /** 与服务端 ORDER BY 一致：置顶 → sortOrder 升序 → id 倒序 */
 function sortRows(rows: LocalItemRow[]): LocalItemRow[] {
   return [...rows].sort((a, b) => {
@@ -248,6 +354,7 @@ function toItem(row: LocalItemRow): PendingItem {
   return {
     id: row.id,
     userId: row.userId,
+    domainId: row.domainId,
     title: row.title,
     notes: row.notes,
     done: row.done,
@@ -301,12 +408,16 @@ function requireUser(): LocalUser {
 }
 
 /** 取自 seq 高水位；同时兼容没有 meta 但已有数据的旧档（把 id 顶到现有最大值之后） */
-function nextId(kind: 'user' | 'item', existingIds: number[]): number {
+function nextId(kind: 'user' | 'item' | 'domain', existingIds: number[]): number {
   const meta = readJson<Partial<SeqMeta>>(SEQ_KEY) ?? {}
   const maxExisting = existingIds.length > 0 ? Math.max(...existingIds) : 0
   const next = Math.max(meta[kind] ?? 0, maxExisting) + 1
-  const base: SeqMeta = { user: meta.user ?? 0, item: meta.item ?? 0 }
-  const updated: SeqMeta = kind === 'user' ? { ...base, user: next } : { ...base, item: next }
+  const base: SeqMeta = {
+    user: meta.user ?? 0,
+    item: meta.item ?? 0,
+    domain: meta.domain ?? 0,
+  }
+  const updated: SeqMeta = { ...base, [kind]: next }
   writeJson(SEQ_KEY, updated)
   return next
 }
@@ -355,6 +466,7 @@ async function hashPassword(password: string, salt: string): Promise<string> {
 // ---------------------------------------------------------------------------
 
 export interface NewItemOptions {
+  domainId?: number
   priority?: Priority
   dueAt?: number | null
   tags?: string[]
@@ -369,6 +481,7 @@ export interface ItemPatch {
   dueAt?: number | null
   tags?: string[]
   pinned?: boolean
+  domainId?: number
 }
 
 export interface ExportPayload {
@@ -376,6 +489,7 @@ export interface ExportPayload {
   version: number
   exportedAt: number
   items: PendingItem[]
+  domains: Domain[]
 }
 
 export interface ImportResult {
@@ -439,9 +553,87 @@ export const api = {
     return { user: toPublicUser(target) }
   },
 
+  async listDomains(): Promise<{ domains: Domain[] }> {
+    const user = requireUser()
+    return { domains: sortDomainRows(ensureDomains(user.id)).map(toDomain) }
+  },
+
+  async addDomain(name: string, emoji: string): Promise<{ domain: Domain }> {
+    const user = requireUser()
+    const cleanName = validateDomainName(name)
+    if (!cleanName) {
+      throw new ApiError(400, `域名称需为 1-${MAX_DOMAIN_NAME} 个字符`)
+    }
+    const cleanEmoji = validateDomainEmoji(emoji)
+    if (!cleanEmoji) throw new ApiError(400, '域图标不合法')
+    const domains = ensureDomains(user.id)
+    if (domains.length >= MAX_DOMAINS) {
+      throw new ApiError(400, `最多创建 ${MAX_DOMAINS} 个域`)
+    }
+    if (domains.some((row) => row.name === cleanName)) {
+      throw new ApiError(409, '同名域已存在')
+    }
+    const row: LocalDomainRow = {
+      id: nextId('domain', domains.map((existing) => existing.id)),
+      name: cleanName,
+      emoji: cleanEmoji,
+      sortOrder: Math.max(...domains.map((existing) => existing.sortOrder), 0) + 1,
+    }
+    domains.push(row)
+    writeJson(domainsKey(user.id), sortDomainRows(domains))
+    return { domain: toDomain(row) }
+  },
+
+  async updateDomain(
+    id: number,
+    patch: { name?: string; emoji?: string },
+  ): Promise<{ domain: Domain }> {
+    const user = requireUser()
+    const domains = ensureDomains(user.id)
+    const row = domains.find((existing) => existing.id === id)
+    if (!row) throw new ApiError(404, '域不存在')
+
+    const handled = (key: string): boolean => key in patch
+    if (handled('name')) {
+      const name = validateDomainName(patch.name)
+      if (!name) throw new ApiError(400, `域名称需为 1-${MAX_DOMAIN_NAME} 个字符`)
+      if (domains.some((existing) => existing.id !== id && existing.name === name)) {
+        throw new ApiError(409, '同名域已存在')
+      }
+      row.name = name
+    }
+    if (handled('emoji')) {
+      const emoji = validateDomainEmoji(patch.emoji)
+      if (!emoji) throw new ApiError(400, '域图标不合法')
+      row.emoji = emoji
+    }
+    if (!handled('name') && !handled('emoji')) {
+      throw new ApiError(400, '缺少可更新字段')
+    }
+    writeJson(domainsKey(user.id), sortDomainRows(domains))
+    return { domain: toDomain(row) }
+  },
+
+  async deleteDomain(id: number): Promise<void> {
+    const user = requireUser()
+    const { domains, rows } = loadUserData(user.id)
+    const index = domains.findIndex((existing) => existing.id === id)
+    if (index < 0) throw new ApiError(404, '域不存在')
+    if (domains.length === 1) {
+      throw new ApiError(400, '至少保留一个域')
+    }
+    const occupied = rows.filter((item) => item.domainId === id).length
+    if (occupied > 0) {
+      throw new ApiError(400, `该域下仍有 ${occupied} 条待办，请先移动或删除`)
+    }
+    domains.splice(index, 1)
+    writeJson(domainsKey(user.id), sortDomainRows(domains))
+  },
+
   async listItems(): Promise<{ items: PendingItem[] }> {
     const user = requireUser()
-    return { items: sortRows(readItems(user.id)).map(toItem) }
+    const { rows } = loadUserData(user.id)
+    return { items: sortRows(rows).map(toItem) }
   },
 
   async addItem(
@@ -457,11 +649,13 @@ export const api = {
     if (notes === null) {
       throw new ApiError(400, `待办明细不能超过 ${MAX_NOTES} 字`)
     }
-    const rows = readItems(user.id)
+    const { domains, rows } = loadUserData(user.id)
+    const domainId = resolveDomainId(domains, options.domainId)
     const now = Date.now()
     const row: LocalItemRow = {
       id: nextId('item', rows.map((item) => item.id)),
       userId: user.id,
+      domainId,
       title: cleanTitle,
       notes,
       done: false,
@@ -479,7 +673,7 @@ export const api = {
 
   async updateItem(id: number, patch: ItemPatch): Promise<{ item: PendingItem }> {
     const user = requireUser()
-    const rows = readItems(user.id)
+    const { domains, rows } = loadUserData(user.id)
     const row = rows.find((item) => item.id === id)
     if (!row) throw new ApiError(404, '条目不存在')
 
@@ -519,8 +713,11 @@ export const api = {
       if (typeof patch.pinned !== 'boolean') throw new ApiError(400, 'pinned 需为布尔值')
       row.pinned = patch.pinned
     }
+    if (handled('domainId')) {
+      row.domainId = resolveDomainId(domains, patch.domainId)
+    }
     if (
-      !['done', 'title', 'notes', 'priority', 'dueAt', 'tags', 'pinned'].some(handled)
+      !['done', 'title', 'notes', 'priority', 'dueAt', 'tags', 'pinned', 'domainId'].some(handled)
     ) {
       throw new ApiError(400, '缺少可更新字段')
     }
@@ -548,7 +745,7 @@ export const api = {
     ) {
       throw new ApiError(400, 'orderedIds 需为非空整数数组')
     }
-    const rows = readItems(user.id)
+    const { rows } = loadUserData(user.id)
     orderedIds.forEach((id, index) => {
       const row = rows.find((item) => item.id === id)
       if (row) row.sortOrder = index
@@ -559,7 +756,7 @@ export const api = {
 
   async clearCompleted(): Promise<{ removed: number }> {
     const user = requireUser()
-    const rows = readItems(user.id)
+    const { rows } = loadUserData(user.id)
     const kept = rows.filter((item) => !item.done)
     writeJson(itemsKey(user.id), kept)
     return { removed: rows.length - kept.length }
@@ -567,23 +764,56 @@ export const api = {
 
   async exportItems(): Promise<ExportPayload> {
     const user = requireUser()
+    const { domains, rows } = loadUserData(user.id)
     return {
       app: 'tiny-pending-item',
       version: 1,
       exportedAt: Date.now(),
-      items: sortRows(readItems(user.id)).map(toItem),
+      items: sortRows(rows).map(toItem),
+      domains: sortDomainRows(domains).map(toDomain),
     }
   },
 
-  async importItems(rawList: unknown[]): Promise<ImportResult> {
+  async importItems(rawList: unknown[], rawDomains: unknown[] = []): Promise<ImportResult> {
     const user = requireUser()
-    if (!Array.isArray(rawList)) {
+    if (!Array.isArray(rawList) || !Array.isArray(rawDomains)) {
       throw new ApiError(400, '导入数据需包含 items 数组')
     }
     if (rawList.length > MAX_IMPORT) {
       throw new ApiError(400, `单次最多导入 ${MAX_IMPORT} 条`)
     }
-    const rows = readItems(user.id)
+    const { domains, rows } = loadUserData(user.id)
+
+    // 文件里的域按名称并入本地（同名合并），建立 文件域id → 本地域id 映射
+    const byName = new Map(domains.map((row) => [row.name, row]))
+    const fileIdToLocal = new Map<number, number>()
+    let maxSort = Math.max(...domains.map((row) => row.sortOrder), 0)
+    let domainsChanged = false
+    for (const raw of rawDomains) {
+      const record = (raw ?? {}) as Record<string, unknown>
+      const name = validateDomainName(record.name)
+      if (!name) continue
+      let local = byName.get(name)
+      if (!local) {
+        if (domains.length >= MAX_DOMAINS) continue
+        const emoji = validateDomainEmoji(record.emoji) ?? '📁'
+        local = {
+          id: nextId('domain', domains.map((row) => row.id)),
+          name,
+          emoji,
+          sortOrder: ++maxSort,
+        }
+        domains.push(local)
+        byName.set(name, local)
+        domainsChanged = true
+      }
+      if (typeof record.id === 'number' && Number.isInteger(record.id) && !fileIdToLocal.has(record.id)) {
+        fileIdToLocal.set(record.id, local.id)
+      }
+    }
+    if (domainsChanged) writeJson(domainsKey(user.id), sortDomainRows(domains))
+
+    const fallbackDomainId = domains[0].id
     let imported = 0
     let skipped = 0
     for (const raw of rawList) {
@@ -603,9 +833,11 @@ export const api = {
           ? Math.floor(record.doneAt)
           : Date.now()
         : null
+      const mappedDomainId = fileIdToLocal.get(record.domainId as number)
       rows.push({
         id: nextId('item', rows.map((item) => item.id)),
         userId: user.id,
+        domainId: mappedDomainId ?? fallbackDomainId,
         title,
         notes: validateNotes(record.notes) ?? '',
         done,

@@ -7,6 +7,7 @@ vi.mock('../../src/api/client', () => {
   interface Row {
     id: number
     userId: number
+    domainId: number
     title: string
     notes: string
     done: boolean
@@ -18,8 +19,26 @@ vi.mock('../../src/api/client', () => {
     pinned: boolean
   }
 
+  interface DomainRow {
+    id: number
+    name: string
+    emoji: string
+  }
+
   let seq = 1
   const rows: Row[] = []
+  const domainRows: DomainRow[] = [
+    { id: 1, name: '工作', emoji: '💼' },
+    { id: 2, name: '生活', emoji: '🏠' },
+    { id: 3, name: '学习', emoji: '📚' },
+  ]
+  let domainSeq = 4
+
+  function requireDomain(value: unknown): number {
+    const found = domainRows.find((row) => row.id === value)
+    if (!found) throw new Error('域不存在')
+    return found.id
+  }
 
   return {
     setUnauthorizedHandler: () => {},
@@ -32,14 +51,43 @@ vi.mock('../../src/api/client', () => {
       updateAvatar: async (avatar: unknown) => ({
         user: { id: 1, username: 'alice', avatar: JSON.stringify(avatar) },
       }),
+      listDomains: async () => ({ domains: domainRows.map((row) => ({ ...row })) }),
+      addDomain: async (name: string, emoji: string) => {
+        if (domainRows.some((row) => row.name === name)) throw new Error('同名域已存在')
+        const domain: DomainRow = { id: domainSeq++, name, emoji }
+        domainRows.push(domain)
+        return { domain: { ...domain } }
+      },
+      updateDomain: async (id: number, patch: { name?: string; emoji?: string }) => {
+        const row = domainRows.find((item) => item.id === id)
+        if (!row) throw new Error('域不存在')
+        if (patch.name !== undefined) {
+          if (domainRows.some((item) => item.id !== id && item.name === patch.name)) {
+            throw new Error('同名域已存在')
+          }
+          row.name = patch.name
+        }
+        if (patch.emoji !== undefined) row.emoji = patch.emoji
+        return { domain: { ...row } }
+      },
+      deleteDomain: async (id: number) => {
+        const index = domainRows.findIndex((row) => row.id === id)
+        if (index < 0) throw new Error('域不存在')
+        if (domainRows.length === 1) throw new Error('至少保留一个域')
+        if (rows.some((row) => row.domainId === id)) {
+          throw new Error('该域下仍有待办，请先移动或删除')
+        }
+        domainRows.splice(index, 1)
+      },
       listItems: async () => ({ items: [...rows] }),
       addItem: async (
         title: string,
-        options: { priority?: Priority; dueAt?: number | null; tags?: string[]; notes?: string } = {},
+        options: { domainId?: number; priority?: Priority; dueAt?: number | null; tags?: string[]; notes?: string } = {},
       ) => {
         const item: Row = {
           id: seq++,
           userId: 1,
+          domainId: options.domainId === undefined ? domainRows[0].id : requireDomain(options.domainId),
           title,
           notes: options.notes ?? '',
           done: false,
@@ -68,6 +116,7 @@ vi.mock('../../src/api/client', () => {
         if ('dueAt' in patch) item.dueAt = (patch.dueAt as number | null) ?? null
         if (Array.isArray(patch.tags)) item.tags = patch.tags as string[]
         if (typeof patch.pinned === 'boolean') item.pinned = patch.pinned
+        if ('domainId' in patch) item.domainId = requireDomain(patch.domainId)
         return { item }
       },
       deleteItem: async (id: number) => {
@@ -110,6 +159,7 @@ vi.mock('../../src/api/client', () => {
           rows.push({
             id: seq++,
             userId: 1,
+            domainId: domainRows[0].id,
             title: record.title.trim(),
             notes: '',
             done: false,
@@ -125,14 +175,30 @@ vi.mock('../../src/api/client', () => {
         return { imported, skipped }
       },
     },
+    /** 测试专用：mock 模块状态在同一文件内跨用例共享，每个用例前重置为初始值 */
+    __resetMockState: (): void => {
+      rows.length = 0
+      domainRows.length = 0
+      domainRows.push(
+        { id: 1, name: '工作', emoji: '💼' },
+        { id: 2, name: '生活', emoji: '🏠' },
+        { id: 3, name: '学习', emoji: '📚' },
+      )
+      seq = 1
+      domainSeq = 4
+    },
   }
 })
 
+import * as clientApi from '../../src/api/client'
 import { useAuthStore } from '../../src/stores/auth'
 import { useItemsStore } from '../../src/stores/items'
+import { useDomainsStore } from '../../src/stores/domains'
 
 beforeEach(() => {
   setActivePinia(createPinia())
+  // mock 的模块状态在同一测试文件内共享，先重置为初始值
+  ;(clientApi as unknown as { __resetMockState?: () => void }).__resetMockState?.()
 })
 
 describe('待办 store：基础行为', () => {
@@ -338,5 +404,119 @@ describe('排序方式持久化（跨会话）', () => {
     storageMap.set('tiny-pending-item:sort', 'garbage')
     setActivePinia(createPinia())
     expect(useItemsStore().sortMode).toBe('manual')
+  })
+})
+
+describe('域 store 与条目的域过滤', () => {
+  let storageMap: Map<string, string>
+
+  beforeEach(() => {
+    storageMap = new Map()
+    globalThis.localStorage = {
+      getItem: (key: string) => storageMap.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        storageMap.set(key, String(value))
+      },
+      removeItem: (key: string) => {
+        storageMap.delete(key)
+      },
+    } as unknown as Storage
+  })
+
+  afterEach(() => {
+    try {
+      delete (globalThis as { localStorage?: unknown }).localStorage
+    } catch {
+      // 非自有属性时忽略
+    }
+  })
+
+  it('加载内置域后，选中域只显示该域条目，统计与标签随域收窄', async () => {
+    const domains = useDomainsStore()
+    await domains.load()
+    expect(domains.list.map((row) => row.name)).toEqual(['工作', '生活', '学习'])
+    expect(domains.domainOptions.map((option) => option.value)).toEqual([1, 2, 3])
+
+    const store = useItemsStore()
+    await store.add('写周报', { domainId: 1, tags: ['办公'] })
+    await store.add('买菜', { domainId: 2, tags: ['家庭'] })
+
+    domains.activeId = 2
+    expect(store.visible.map((item) => item.title)).toEqual(['买菜'])
+    expect(store.total).toBe(1)
+    expect(store.remaining).toBe(1)
+    expect(store.availableTags).toEqual(['家庭'])
+
+    domains.activeId = null
+    expect(store.total).toBe(2)
+    expect(store.availableTags).toEqual(['办公', '家庭'])
+  })
+
+  it('新建待办归属所选域；选择持久化并在新会话恢复', async () => {
+    const domains = useDomainsStore()
+    await domains.load()
+    domains.activeId = 3
+    await nextTick()
+    expect(storageMap.get('tiny-pending-item:domain')).toBe('3')
+
+    setActivePinia(createPinia()) // 模拟刷新后重建 store
+    const restored = useDomainsStore()
+    expect(restored.activeId).toBe(3)
+    await restored.load()
+    expect(restored.active?.name).toBe('学习')
+  })
+
+  it('持久化的选择指向已删除的域时回退到全部', async () => {
+    storageMap.set('tiny-pending-item:domain', '99')
+    const domains = useDomainsStore()
+    await domains.load()
+    expect(domains.activeId).toBeNull()
+  })
+
+  it('新增域、重命名与删除；删除当前选中域后回退到全部', async () => {
+    const domains = useDomainsStore()
+    await domains.load()
+
+    await domains.add('副业', '🎯')
+    const created = domains.list.find((row) => row.name === '副业')
+    if (!created) throw new Error('新建域不存在')
+
+    await domains.rename(created.id, '兴趣')
+    expect(domains.list.find((row) => row.id === created.id)?.name).toBe('兴趣')
+
+    const store = useItemsStore()
+    await store.add('侧项目', { domainId: created.id })
+    domains.activeId = created.id
+    expect(store.visible).toHaveLength(1)
+
+    // 域内有待办时先移走条目才能删除域
+    await store.update(store.items[0]!.id, { domainId: 1 })
+    await domains.remove(created.id)
+    expect(domains.list.some((row) => row.name === '兴趣')).toBe(false)
+    expect(domains.activeId).toBeNull()
+    // 条目仍在，只是换了域；回到全部域可见
+    expect(store.items).toHaveLength(1)
+    expect(store.total).toBe(1)
+  })
+
+  it('重命名与其他域同名、删除仍有条目的域时抛出错误且列表不变', async () => {
+    const domains = useDomainsStore()
+    await domains.load()
+
+    const store = useItemsStore()
+    await store.add('占位', { domainId: 1 })
+
+    await expect(domains.rename(1, '生活')).rejects.toThrow('同名域已存在')
+    await expect(domains.remove(1)).rejects.toThrow('仍有待办')
+    expect(domains.list).toHaveLength(3)
+  })
+
+  it('store.add 未传 domainId 时归入第一个域（与数据层默认一致）', async () => {
+    const store = useItemsStore()
+    const domains = useDomainsStore()
+    await domains.load()
+
+    await store.add('默认归属')
+    expect(store.items[0]?.domainId).toBe(1)
   })
 })

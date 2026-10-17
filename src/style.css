@@ -351,6 +351,90 @@ body.dark .bg-blob.b3 {
   color: var(--accent, #3f7cf6);
 }
 
+/* ===== 域导航 ===== */
+
+.side-domains .side-heading .heading-action {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  padding: 2px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.side-domains .side-heading .heading-action:hover {
+  background: var(--card-hover);
+  color: var(--text);
+}
+
+.domain-emoji {
+  font-size: 15px;
+  line-height: 1;
+}
+
+/* ===== 卡片上的域标记 ===== */
+
+.domain-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.todo-item.done .domain-chip {
+  color: var(--faint);
+}
+
+/* ===== 管理域对话框 ===== */
+
+.domain-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.domain-add-row .n-input {
+  flex: 1;
+}
+
+.domain-emoji-select {
+  width: 64px;
+  flex: none;
+}
+
+.domain-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.domain-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.domain-row .n-input {
+  flex: 1;
+}
+
+.domain-hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .tag-chips {
   display: flex;
   flex-wrap: wrap;
@@ -1052,6 +1136,10 @@ body.dark .user-avatar {
 
   .side-nav {
     flex-direction: row;
+  }
+
+  .side-domains .side-nav {
+    flex-wrap: wrap;
   }
 
   .nav-item {

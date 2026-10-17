@@ -3,9 +3,11 @@ import { reactive, ref } from 'vue'
 import { useMessage } from 'naive-ui'
 import { AddOutline } from '@vicons/ionicons5'
 import { useItemsStore } from '../stores/items'
+import { useDomainsStore } from '../stores/domains'
 import { PRIORITIES, PRIORITY_LABELS, type Priority } from '../types'
 
 const items = useItemsStore()
+const domains = useDomainsStore()
 const message = useMessage()
 
 const show = ref(false)
@@ -15,12 +17,14 @@ const titleInput = ref<{ focus: () => void } | null>(null)
 const draft = reactive<{
   title: string
   notes: string
+  domainId: number | null
   priority: Priority
   dueAt: number | null
   tags: string[]
 }>({
   title: '',
   notes: '',
+  domainId: null,
   priority: 'medium',
   dueAt: null,
   tags: [],
@@ -28,9 +32,16 @@ const draft = reactive<{
 
 const priorityOptions = PRIORITIES.map((value) => ({ label: PRIORITY_LABELS[value], value }))
 
+/** 默认归属：当前选中的域；在“全部域”下则取第一个域 */
+function defaultDomainId(): number | null {
+  if (domains.activeId !== null) return domains.activeId
+  return domains.list[0]?.id ?? null
+}
+
 function resetDraft(): void {
   draft.title = ''
   draft.notes = ''
+  draft.domainId = defaultDomainId()
   draft.priority = 'medium'
   draft.dueAt = null
   draft.tags = []
@@ -55,6 +66,7 @@ async function submit(): Promise<void> {
   submitting.value = true
   try {
     await items.add(title, {
+      domainId: draft.domainId ?? domains.list[0]?.id,
       priority: draft.priority,
       dueAt: draft.dueAt,
       tags: draft.tags,
@@ -111,6 +123,15 @@ defineExpose({ open })
       </div>
 
       <div class="field-grid">
+        <div>
+          <label class="field-label">域</label>
+          <n-select
+            v-model:value="draft.domainId"
+            size="small"
+            :options="domains.domainOptions"
+            placeholder="选择域"
+          />
+        </div>
         <div>
           <label class="field-label">优先级</label>
           <n-select v-model:value="draft.priority" size="small" :options="priorityOptions" />

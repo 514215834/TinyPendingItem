@@ -33,7 +33,20 @@ npm run build      # 构建静态 dist/
 |---|---|
 | `tiny-pending-item:token` | 当前会话（本地账号 id） |
 | `tiny-pending-item:local:users` | 本地账号列表（含口令哈希） |
+| `tiny-pending-item:local:domains:<userId>` | 各账号的域（待办场景分组） |
 | `tiny-pending-item:local:items:<userId>` | 各账号待办数据 |
 | `tiny-pending-item:local:seq` | 递增 id 高水位 |
+| `tiny-pending-item:domain` | 当前选中的域（跨会话偏好） |
+| `tiny-pending-item:sort` | 排序方式（跨会话偏好） |
+
+## 域（待办场景隔离）
+
+待办按“域”分组隔离，如工作、生活、学习：
+
+- 新账号自动内置 **工作 💼 / 生活 🏠 / 学习 📚** 三个域；旧档案首次访问时自动补种并把存量待办归入第一个域
+- 侧栏“域”区可切换视图，“全部域”显示所有待办（卡片上带归属域标记）
+- 点侧栏“域”标题右侧的齿轮打开 **管理域**：新增（名称 1-10 字 + 图标）、重命名/换图标、删除（域内有待办时需先移走或清空；至少保留一个域）
+- 添加待办与明细面板均可选择/移动域；每个账号上限 20 个域
+- 导出 JSON 包含 `domains` 字段；导入时文件中的域按名称合并，旧格式文件（无域信息）的条目归入第一个域
 
 目录结构与功能说明见 [docs/](docs/)（架构文档描述的是后端版本，本分支把数据层换成了 `src/api/client.ts` 中的 localStorage 实现，接口和行为与其保持一致）。

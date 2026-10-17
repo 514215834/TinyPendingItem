@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { useMessage } from 'naive-ui'
 import { useItemsStore } from '../stores/items'
+import { useDomainsStore } from '../stores/domains'
 import { TrashOutline, StarOutline, Star } from '@vicons/ionicons5'
 import { PRIORITIES, PRIORITY_LABELS, type PendingItem, type Priority } from '../types'
 
@@ -14,6 +15,7 @@ const emit = defineEmits<{
 }>()
 
 const items = useItemsStore()
+const domains = useDomainsStore()
 const message = useMessage()
 
 const dragging = ref(false)
@@ -24,6 +26,11 @@ const editDueAt = ref<number | null>(null)
 const editTags = ref<string[]>([])
 
 const priorityOptions = PRIORITIES.map((value) => ({ label: PRIORITY_LABELS[value], value }))
+
+/** “全部域”视图下卡片显示归属域，域视图内则省略 */
+const ownerDomain = computed(() =>
+  domains.activeId === null ? domains.list.find((row) => row.id === props.item.domainId) ?? null : null,
+)
 
 const dueState = computed<'none' | 'overdue' | 'today' | 'future'>(() => {
   if (!props.item.dueAt || props.item.done) return 'none'
@@ -122,6 +129,7 @@ function onDragEnd(): void {
         </div>
         <div class="meta">
           <span v-if="item.notes" class="notes-hint" :title="item.notes">📄</span>
+          <span v-if="ownerDomain" class="domain-chip">{{ ownerDomain.emoji }} {{ ownerDomain.name }}</span>
           <n-tag v-for="tag in item.tags" :key="tag" size="tiny" round :bordered="false">{{ tag }}</n-tag>
           <span v-if="dueState === 'overdue'" class="due overdue">已逾期 {{ formatDue(item.dueAt!) }}</span>
           <span v-else-if="dueState === 'today'" class="due today">今天截止</span>

@@ -1,6 +1,7 @@
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { api, type ItemPatch } from '../api/client'
+import { useDomainsStore } from './domains'
 import type { PendingItem, Priority } from '../types'
 
 export type SortMode = 'manual' | 'priority'
@@ -28,6 +29,7 @@ function persistSortMode(mode: SortMode): void {
 }
 
 export const useItemsStore = defineStore('items', () => {
+  const domains = useDomainsStore()
   const items = ref<PendingItem[]>([])
   const filter = ref<string>('all')
   const loading = ref(false)
@@ -39,20 +41,25 @@ export const useItemsStore = defineStore('items', () => {
   /** 排序方式为跨会话偏好，变化时落盘 */
   watch(sortMode, (mode) => persistSortMode(mode))
 
-  const total = computed(() => items.value.length)
-  const remaining = computed(() => items.value.filter((item) => !item.done).length)
-  const doneCount = computed(() => items.value.filter((item) => item.done).length)
+  /** 当前域范围内的条目：统计、标签与列表都基于它；activeId 为 null 即全部域 */
+  const scoped = computed(() =>
+    domains.activeId === null ? items.value : items.value.filter((item) => item.domainId === domains.activeId),
+  )
+
+  const total = computed(() => scoped.value.length)
+  const remaining = computed(() => scoped.value.filter((item) => !item.done).length)
+  const doneCount = computed(() => scoped.value.filter((item) => item.done).length)
 
   const availableTags = computed(() => {
     const tags = new Set<string>()
-    for (const item of items.value) {
+    for (const item of scoped.value) {
       for (const tag of item.tags) tags.add(tag)
     }
     return [...tags].sort()
   })
 
   const visible = computed(() => {
-    let list = items.value
+    let list = scoped.value
     if (filter.value !== 'all') {
       list = list.filter((item) => (filter.value === 'done' ? item.done : !item.done))
     }
@@ -86,7 +93,7 @@ export const useItemsStore = defineStore('items', () => {
 
   async function add(
     title: string,
-    options: { priority?: Priority; dueAt?: number | null; tags?: string[]; notes?: string } = {},
+    options: { domainId?: number; priority?: Priority; dueAt?: number | null; tags?: string[]; notes?: string } = {},
   ): Promise<void> {
     const result = await api.addItem(title, options)
     items.value.unshift(result.item)
@@ -139,8 +146,11 @@ export const useItemsStore = defineStore('items', () => {
     return removed
   }
 
-  async function importItems(list: unknown[]): Promise<{ imported: number; skipped: number }> {
-    const result = await api.importItems(list)
+  async function importItems(
+    list: unknown[],
+    domainList: unknown[] = [],
+  ): Promise<{ imported: number; skipped: number }> {
+    const result = await api.importItems(list, domainList)
     await load()
     return result
   }

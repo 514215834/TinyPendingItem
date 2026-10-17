@@ -3,20 +3,24 @@ import { reactive, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import { CloseOutline, DocumentTextOutline } from '@vicons/ionicons5'
 import { useItemsStore } from '../stores/items'
+import { useDomainsStore } from '../stores/domains'
 import { PRIORITIES, PRIORITY_LABELS, type Priority } from '../types'
 
 const items = useItemsStore()
+const domains = useDomainsStore()
 const message = useMessage()
 
 const draft = reactive<{
   title: string
   notes: string
+  domainId: number | null
   priority: Priority
   dueAt: number | null
   tags: string[]
 }>({
   title: '',
   notes: '',
+  domainId: null,
   priority: 'medium',
   dueAt: null,
   tags: [],
@@ -31,6 +35,7 @@ watch(
     if (!sel) return
     draft.title = sel.title
     draft.notes = sel.notes
+    draft.domainId = sel.domainId
     draft.priority = sel.priority
     draft.dueAt = sel.dueAt
     draft.tags = [...sel.tags]
@@ -60,6 +65,7 @@ async function save(): Promise<void> {
     await items.update(sel.id, {
       title,
       notes: draft.notes,
+      domainId: draft.domainId ?? sel.domainId,
       priority: draft.priority,
       dueAt: draft.dueAt,
       tags: draft.tags,
@@ -119,6 +125,16 @@ async function removeItem(): Promise<void> {
             maxlength="2000"
             show-count
             placeholder="补充说明、链接、子步骤…"
+          />
+        </div>
+
+        <div>
+          <label class="field-label">域</label>
+          <n-select
+            v-model:value="draft.domainId"
+            size="small"
+            :options="domains.domainOptions"
+            placeholder="选择域"
           />
         </div>
 

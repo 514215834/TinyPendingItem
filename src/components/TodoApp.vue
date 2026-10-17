@@ -1,20 +1,24 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useMessage } from 'naive-ui'
 import {
+  AppsOutline,
   CheckmarkCircleOutline,
   CloudUploadOutline,
   ColorPaletteOutline,
   DownloadOutline,
   LogOutOutline,
   MoonOutline,
+  PlanetOutline,
   PricetagsOutline,
   ReorderFourOutline,
+  SettingsOutline,
   SunnyOutline,
   TimeOutline,
 } from '@vicons/ionicons5'
 import { useAuthStore } from '../stores/auth'
 import { useItemsStore } from '../stores/items'
+import { useDomainsStore } from '../stores/domains'
 import { useThemeStore } from '../stores/theme'
 import { api } from '../api/client'
 import AddTodo from './AddTodo.vue'
@@ -22,19 +26,33 @@ import TodoList from './TodoList.vue'
 import TodoDetail from './TodoDetail.vue'
 import UserAvatar from './UserAvatar.vue'
 import SettingsDialog from './SettingsDialog.vue'
+import DomainsDialog from './DomainsDialog.vue'
 
 const auth = useAuthStore()
 const items = useItemsStore()
+const domains = useDomainsStore()
 const theme = useThemeStore()
 const message = useMessage()
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const addTodoRef = ref<InstanceType<typeof AddTodo> | null>(null)
 const settingsOpen = ref(false)
+const domainsOpen = ref(false)
+
+/** 各域的待办总数（含已完成），供侧栏角标展示 */
+const domainCounts = computed<Record<number, number>>(() => {
+  const counts: Record<number, number> = {}
+  for (const item of items.items) {
+    counts[item.domainId] = (counts[item.domainId] ?? 0) + 1
+  }
+  return counts
+})
 
 onMounted(() => {
   items.reset()
+  domains.reset()
   void items.load()
+  void domains.load()
   window.addEventListener('keydown', onKeydown)
 })
 
@@ -103,8 +121,16 @@ async function onImportFile(event: Event): Promise<void> {
       message.error('文件格式不正确：需为待办数组或包含 items 字段')
       return
     }
-    const { imported, skipped } = await items.importItems(list)
-    message.success(`导入完成：成功 ${imported} 条${skipped > 0 ? `，跳过 ${skipped} 条` : ''}`)
+    const domainList =
+      parsed && typeof parsed === 'object' && Array.isArray((parsed as { domains?: unknown }).domains)
+        ? (parsed as { domains: unknown[] }).domains
+        : []
+    const { imported, skipped } = await items.importItems(list, domainList)
+    message.success(
+      `导入完成：成功 ${imported} 条${skipped > 0 ? `，跳过 ${skipped} 条` : ''}${
+        domainList.length > 0 ? '（文件中的域已按名称合并）' : ''
+      }`,
+    )
   } catch (error) {
     if (error instanceof SyntaxError) {
       message.error('文件不是合法的 JSON')
@@ -151,6 +177,31 @@ async function onImportFile(event: Event): Promise<void> {
           <span class="nav-count">{{ items.doneCount }}</span>
         </button>
       </nav>
+
+      <div class="side-domains">
+        <p class="side-heading">
+          <n-icon :component="PlanetOutline" />域
+          <button type="button" class="heading-action" title="管理域" @click="domainsOpen = true">
+            <n-icon :component="SettingsOutline" />
+          </button>
+        </p>
+        <nav class="side-nav">
+          <button class="nav-item" :class="{ active: domains.activeId === null }" @click="domains.activeId = null">
+            <span class="nav-label"><n-icon :component="AppsOutline" />全部域</span>
+            <span class="nav-count">{{ items.items.length }}</span>
+          </button>
+          <button
+            v-for="domain in domains.list"
+            :key="domain.id"
+            class="nav-item"
+            :class="{ active: domains.activeId === domain.id }"
+            @click="domains.activeId = domain.id"
+          >
+            <span class="nav-label"><span class="domain-emoji">{{ domain.emoji }}</span>{{ domain.name }}</span>
+            <span class="nav-count">{{ domainCounts[domain.id] ?? 0 }}</span>
+          </button>
+        </nav>
+      </div>
 
       <div v-if="items.availableTags.length > 0" class="side-tags">
         <p class="side-heading"><n-icon :component="PricetagsOutline" />标签</p>
@@ -224,6 +275,7 @@ async function onImportFile(event: Event): Promise<void> {
       </div>
 
       <SettingsDialog v-model:show="settingsOpen" />
+      <DomainsDialog v-model:show="domainsOpen" />
     </aside>
 
     <main class="main">

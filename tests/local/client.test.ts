@@ -335,6 +335,205 @@ describe('编辑、优先级、截止、标签、置顶、排序、清理、导�
   })
 })
 
+describe('域：内置播种与增改删', () => {
+  it('新账号自动播种内置域：工作、生活、学习', async () => {
+    await registerAndLogin('domain-seed')
+    const domains = (await api.listDomains()).domains
+    expect(domains.map((row) => row.name)).toEqual(['工作', '生活', '学习'])
+    expect(domains.map((row) => row.emoji)).toEqual(['💼', '🏠', '📚'])
+  })
+
+  it('新增域：合法名称与图标，重名拒绝，超长拒绝', async () => {
+    await registerAndLogin('domain-add')
+    const { domain } = await api.addDomain('副业', '🎯')
+    expect(domain.name).toBe('副业')
+    expect(domain.emoji).toBe('🎯')
+    expect((await api.listDomains()).domains.map((row) => row.name)).toEqual(['工作', '生活', '学习', '副业'])
+
+    await expectApiError(api.addDomain('工作', '💼'), 409, '同名域已存在')
+    await expectApiError(api.addDomain('   ', '🎯'), 400)
+    await expectApiError(api.addDomain('一个特别特别长的名字超限', '🎯'), 400)
+    await expectApiError(api.addDomain('健康', ''), 400, '域图标不合法')
+  })
+
+  it('修改域：重命名与换图标，重名（含自身除外）拒绝', async () => {
+    await registerAndLogin('domain-update')
+    const { domain } = await api.addDomain('副业', '🎯')
+
+    const renamed = (await api.updateDomain(domain.id, { name: '兴趣爱好', emoji: '🎮' })).domain
+    expect(renamed.name).toBe('兴趣爱好')
+    expect(renamed.emoji).toBe('🎮')
+
+    await expectApiError(api.updateDomain(domain.id, { name: '工作' }), 409)
+    await expectApiError(api.updateDomain(domain.id, { name: '   ' }), 400)
+    await expectApiError(api.updateDomain(99999, { name: '不存在' }), 404)
+    await expectApiError(api.updateDomain(domain.id, {}), 400, '缺少可更新字段')
+  })
+
+  it('删除仍有待办的域被拒绝；删空域成功；最后一个域不可删', async () => {
+    await registerAndLogin('domain-delete')
+    const { domain: extra } = await api.addDomain('临时', '📁')
+    await addItem('占用域的待办', { domainId: extra.id })
+
+    await expectApiError(api.deleteDomain(extra.id), 400)
+    // 提示语说明阻塞原因
+    try {
+      await api.deleteDomain(extra.id)
+    } catch (error) {
+      expect((error as ApiError).message).toContain('仍有 1 条待办')
+    }
+
+    await api.deleteItem((await api.listItems()).items[0]!.id)
+    await api.deleteDomain(extra.id)
+    expect((await api.listDomains()).domains.map((row) => row.name)).toEqual(['工作', '生活', '学习'])
+
+    // 逐个删空后仅剩一个域，此时拒绝删除最后一个
+    const rest = (await api.listDomains()).domains
+    await api.deleteDomain(rest[1]!.id)
+    await api.deleteDomain(rest[2]!.id)
+    expect((await api.listDomains()).domains.map((row) => row.name)).toEqual(['工作'])
+    await expectApiError(api.deleteDomain((await api.listDomains()).domains[0]!.id), 400, '至少保留一个域')
+  })
+
+  it('域数量到达上限后拒绝新建', async () => {
+    await registerAndLogin('domain-max')
+    for (let i = 0; i < 17; i++) {
+      await api.addDomain(`域${i}`, '📁')
+    }
+    await expectApiError(api.addDomain('超额', '📁'), 400)
+    expect((await api.listDomains()).domains).toHaveLength(20)
+  })
+
+  it('各账号域彼此隔离，B 无法把条目改到 A 的域', async () => {
+    await registerAndLogin('domain-iso-a')
+    const { domain } = await api.addDomain('A 的私域', '🔒')
+    await addItem('A 的待办')
+
+    await registerAndLogin('domain-iso-b')
+    const listB = (await api.listDomains()).domains
+    expect(listB.map((row) => row.name)).toEqual(['工作', '生活', '学习'])
+    const idB = (await addItem('B 的待办')).id
+
+    await expectApiError(api.updateItem(idB, { domainId: domain.id }), 400, '域不存在')
+    await addItem('B 的第二条', { domainId: domain.id })
+      .then(() => {
+        throw new Error('预期应抛出 ApiError，但操作成功了')
+      })
+      .catch((error: unknown) => {
+        expect((error as ApiError).status).toBe(400)
+      })
+
+    await loginAs('domain-iso-a')
+    expect((await api.listDomains()).domains.some((row) => row.name === 'A 的私域')).toBe(true)
+  })
+})
+
+describe('条目与域的绑定', () => {
+  it('addItem 不带 domainId 时归入第一个域；非法 domainId 拒绝', async () => {
+    await registerAndLogin('bind-a')
+    const first = (await api.listDomains()).domains[0]!
+
+    const item = await addItem('默认归属')
+    expect(item.domainId).toBe(first.id)
+
+    await expectApiError(api.addItem('非法归属', { domainId: 99999 }), 400, '域不存在')
+    await expectApiError(api.addItem('非法归属', { domainId: 'x' as unknown as number }), 400)
+  })
+
+  it('PATCH domainId 可移动条目到其他域', async () => {
+    await registerAndLogin('bind-b')
+    const domains = (await api.listDomains()).domains
+    const item = await addItem('搬家前')
+
+    const moved = (await api.updateItem(item.id, { domainId: domains[2]!.id })).item
+    expect(moved.domainId).toBe(domains[2]!.id)
+
+    // 按域读取数据层：移动后其他域不含该条目
+    const list = (await api.listItems()).items
+    expect(list.find((row) => row.id === item.id)?.domainId).toBe(domains[2]!.id)
+  })
+
+  it('旧档案（无 domainId 字段）读档后归入第一个域', async () => {
+    const user = await registerAndLogin('legacy-domain')
+    globalThis.localStorage.setItem(
+      `tiny-pending-item:local:items:${user.id}`,
+      JSON.stringify([{ id: 9001, title: '旧条目', createdAt: 1600000000000 }]),
+    )
+
+    const list = (await api.listItems()).items
+    const first = (await api.listDomains()).domains[0]!
+    expect(list).toHaveLength(1)
+    expect(list[0]!.domainId).toBe(first.id)
+
+    // 归位结果已回写，再读一次稳定
+    expect((await api.listItems()).items[0]!.domainId).toBe(first.id)
+  })
+
+  it('条目指向已删除域（例如档案被手工改动）时读档归入第一个域', async () => {
+    const user = await registerAndLogin('orphan-domain')
+    const first = (await api.listDomains()).domains[0]!
+    globalThis.localStorage.setItem(
+      `tiny-pending-item:local:items:${user.id}`,
+      JSON.stringify([
+        { id: 9001, title: '孤儿条目', createdAt: 1600000000000, domainId: 424242 },
+      ]),
+    )
+    const list = (await api.listItems()).items
+    expect(list[0]!.domainId).toBe(first.id)
+  })
+})
+
+describe('导入导出与域', () => {
+  it('导出包含域列表；导入按名称合并域并映射条目归属', async () => {
+    await registerAndLogin('exim-domain')
+    await api.addDomain('旅行', '✈️')
+    const domains = (await api.listDomains()).domains
+    const travel = domains.find((row) => row.name === '旅行')!
+    await addItem('装箱清单', { domainId: travel.id })
+
+    const payload = await api.exportItems()
+    expect(payload.domains.map((row) => row.name)).toEqual(['工作', '生活', '学习', '旅行'])
+
+    await registerAndLogin('exim-domain-b')
+    let result = await api.importItems(payload.items, payload.domains)
+    expect(result).toEqual({ imported: 1, skipped: 0 })
+
+    const domainsB = (await api.listDomains()).domains
+    // 文件里的“旅行”被并入；内置三个同名域合并不重复
+    expect(domainsB.map((row) => row.name)).toEqual(['工作', '生活', '学习', '旅行'])
+    const travelB = domainsB.find((row) => row.name === '旅行')!
+    expect(travelB.emoji).toBe('✈️')
+
+    const listB = (await api.listItems()).items
+    expect(listB[0]!.title).toBe('装箱清单')
+    expect(listB[0]!.domainId).toBe(travelB.id)
+
+    // 同一文件再次导入：域不再重复，条目再次入库
+    result = await api.importItems(payload.items, payload.domains)
+    expect(result).toEqual({ imported: 1, skipped: 0 })
+    expect((await api.listDomains()).domains).toHaveLength(4)
+  })
+
+  it('导入旧格式（无域信息）时条目归入第一个域', async () => {
+    await registerAndLogin('exim-legacy')
+    await api.importItems([{ title: '旧备份' }])
+    const list = (await api.listItems()).items
+    const first = (await api.listDomains()).domains[0]!
+    expect(list[0]!.domainId).toBe(first.id)
+  })
+
+  it('导入时条目引用文件中不存在的域 id，归入第一个域', async () => {
+    await registerAndLogin('exim-orphan')
+    const result = await api.importItems([{ title: '悬空条目', domainId: 777 }], [
+      { id: 1, name: '别处的工作', emoji: '💼' },
+    ])
+    expect(result).toEqual({ imported: 1, skipped: 0 })
+    const domains = (await api.listDomains()).domains
+    expect(domains.some((row) => row.name === '别处的工作')).toBe(true)
+    expect((await api.listItems()).items[0]!.domainId).toBe(domains[0]!.id)
+  })
+})
+
 describe('用户头像（本地存储）', () => {
   it('未设置时为空；设置后小写化保存并可回读', async () => {
     await registerAndLogin('avatar-a')
