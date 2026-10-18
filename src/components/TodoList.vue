@@ -3,9 +3,11 @@ import { computed, ref } from 'vue'
 import { useMessage } from 'naive-ui'
 import { CheckmarkDoneOutline, SearchOutline } from '@vicons/ionicons5'
 import { useItemsStore } from '../stores/items'
+import { useThemeStore } from '../stores/theme'
 import TodoItem from './TodoItem.vue'
 
 const items = useItemsStore()
+const theme = useThemeStore()
 const message = useMessage()
 
 const sortOptions = [
@@ -105,17 +107,24 @@ async function clearDone(): Promise<void> {
     <div class="list-scroll">
       <n-spin :show="items.loading">
         <n-empty v-if="items.visible.length === 0" class="todo-empty" :description="emptyText" />
-        <TransitionGroup v-else name="list" tag="ul" class="todo-items">
-          <TodoItem
-            v-for="item in items.visible"
-            :key="item.id"
-            :item="item"
-            :can-drag="dragEnabled"
-            @item-dragstart="onDragStart"
-            @item-dragover="onDragOver"
-            @item-dragend="onDragEnd"
-          />
-        </TransitionGroup>
+      <TransitionGroup
+        v-else
+        name="list"
+        tag="ul"
+        class="todo-items"
+        :class="{ 'cards-grid': theme.viewMode === 'card' }"
+      >
+        <TodoItem
+          v-for="item in items.visible"
+          :key="item.id"
+          :item="item"
+          :can-drag="dragEnabled"
+          :variant="theme.viewMode"
+          @item-dragstart="onDragStart"
+          @item-dragover="onDragOver"
+          @item-dragend="onDragEnd"
+        />
+      </TransitionGroup>
       </n-spin>
     </div>
   </div>

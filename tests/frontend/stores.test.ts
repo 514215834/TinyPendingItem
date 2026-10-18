@@ -226,6 +226,7 @@ import * as clientApi from '../../src/api/client'
 import { useAuthStore } from '../../src/stores/auth'
 import { useItemsStore } from '../../src/stores/items'
 import { useDomainsStore } from '../../src/stores/domains'
+import { useThemeStore } from '../../src/stores/theme'
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -639,5 +640,46 @@ describe('回收站（软删除）', () => {
 
     await expect(store.update(id, { title: '改名' })).rejects.toThrow('条目不存在')
     await expect(store.remove(id)).rejects.toThrow('条目不存在')
+  })
+})
+
+describe('列表样式偏好（跨会话记忆）', () => {
+  let storageMap: Map<string, string>
+
+  beforeEach(() => {
+    storageMap = new Map()
+    globalThis.localStorage = {
+      getItem: (key: string) => storageMap.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        storageMap.set(key, String(value))
+      },
+      removeItem: (key: string) => {
+        storageMap.delete(key)
+      },
+    } as unknown as Storage
+  })
+
+  afterEach(() => {
+    try {
+      delete (globalThis as { localStorage?: unknown }).localStorage
+    } catch {
+      // 非自有属性时忽略
+    }
+  })
+
+  it('切换卡片视图后写入磁盘，新会话读取后保留；非法值回退为列表', () => {
+    const theme = useThemeStore()
+    expect(theme.viewMode).toBe('list')
+
+    theme.setViewMode('card')
+    expect(theme.viewMode).toBe('card')
+    expect(storageMap.get('tiny-pending-item:view')).toBe('card')
+
+    setActivePinia(createPinia()) // 模拟刷新后重建 store
+    expect(useThemeStore().viewMode).toBe('card')
+
+    storageMap.set('tiny-pending-item:view', 'garbage')
+    setActivePinia(createPinia())
+    expect(useThemeStore().viewMode).toBe('list')
   })
 })

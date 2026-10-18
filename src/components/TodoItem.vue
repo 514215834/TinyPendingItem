@@ -6,7 +6,7 @@ import { useDomainsStore } from '../stores/domains'
 import { TrashOutline, StarOutline, Star } from '@vicons/ionicons5'
 import { PRIORITIES, PRIORITY_LABELS, type PendingItem, type Priority } from '../types'
 
-const props = defineProps<{ item: PendingItem; canDrag: boolean }>()
+const props = defineProps<{ item: PendingItem; canDrag: boolean; variant?: 'list' | 'card' }>()
 
 const emit = defineEmits<{
   'item-dragstart': [id: number]
@@ -17,6 +17,14 @@ const emit = defineEmits<{
 const items = useItemsStore()
 const domains = useDomainsStore()
 const message = useMessage()
+
+const isCard = computed(() => props.variant === 'card')
+
+/** 卡片视图展示明细摘要，避免内容溢出 */
+const notesPreview = computed(() => {
+  const notes = props.item.notes
+  return notes.length > 80 ? `${notes.slice(0, 80)}…` : notes
+})
 
 const dragging = ref(false)
 const editing = ref(false)
@@ -137,6 +145,7 @@ async function onRemove(): Promise<void> {
           <span class="prio" :class="`prio-${item.priority}`">{{ PRIORITY_LABELS[item.priority] }}</span>
           <span class="title" title="双击编辑" @dblclick="startEdit">{{ item.title }}</span>
         </div>
+        <p v-if="isCard && item.notes" class="card-notes" :title="item.notes">{{ notesPreview }}</p>
         <div class="meta">
           <span v-if="item.notes" class="notes-hint" :title="item.notes">📄</span>
           <span v-if="ownerDomain" class="domain-chip">{{ ownerDomain.emoji }} {{ ownerDomain.name }}</span>
@@ -148,29 +157,31 @@ async function onRemove(): Promise<void> {
         </div>
       </div>
 
-      <n-tooltip>
-        <template #trigger>
-          <n-button
-            quaternary
-            circle
-            size="tiny"
-            class="pin"
-            :type="item.pinned ? 'warning' : 'default'"
-            @click="items.togglePin(item)"
-          >
-            <n-icon :component="item.pinned ? Star : StarOutline" />
-          </n-button>
-        </template>
-        {{ item.pinned ? '取消置顶' : '置顶' }}
-      </n-tooltip>
-      <n-tooltip>
-        <template #trigger>
-          <n-button quaternary circle size="tiny" type="error" @click="onRemove">
-            <n-icon :component="TrashOutline" />
-          </n-button>
-        </template>
-        删除
-      </n-tooltip>
+      <span class="item-actions">
+        <n-tooltip>
+          <template #trigger>
+            <n-button
+              quaternary
+              circle
+              size="tiny"
+              class="pin"
+              :type="item.pinned ? 'warning' : 'default'"
+              @click="items.togglePin(item)"
+            >
+              <n-icon :component="item.pinned ? Star : StarOutline" />
+            </n-button>
+          </template>
+          {{ item.pinned ? '取消置顶' : '置顶' }}
+        </n-tooltip>
+        <n-tooltip>
+          <template #trigger>
+            <n-button quaternary circle size="tiny" type="error" @click="onRemove">
+              <n-icon :component="TrashOutline" />
+            </n-button>
+          </template>
+          删除
+        </n-tooltip>
+      </span>
     </template>
 
     <template v-else>

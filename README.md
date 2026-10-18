@@ -34,10 +34,18 @@ npm run build      # 构建静态 dist/
 | `tiny-pending-item:token` | 当前会话（本地账号 id） |
 | `tiny-pending-item:local:users` | 本地账号列表（含口令哈希） |
 | `tiny-pending-item:local:domains:<userId>` | 各账号的域（待办场景分组） |
-| `tiny-pending-item:local:items:<userId>` | 各账号待办数据 |
+| `tiny-pending-item:local:items:<userId>` | 各账号待办数据（含回收站条目的删除标记） |
 | `tiny-pending-item:local:seq` | 递增 id 高水位 |
 | `tiny-pending-item:domain` | 当前选中的域（跨会话偏好） |
 | `tiny-pending-item:sort` | 排序方式（跨会话偏好） |
+| `tiny-pending-item:view` | 列表样式：列表 / 卡片（跨会话偏好） |
+
+## 显示偏好
+
+以下偏好都保存在本地并跨会话记忆，不会随账号或会话重置：
+
+- **排序方式**：手动排序 / 按优先级（列表工具栏切换）
+- **列表样式**：列表行 / 卡片网格（个性化设置中切换）；卡片视图显示标题、优先级、归属域、明细两行预览与标签等完整信息
 
 ## 域（待办场景隔离）
 

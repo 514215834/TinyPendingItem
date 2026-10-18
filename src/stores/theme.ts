@@ -3,6 +3,10 @@ import { defineStore } from 'pinia'
 
 const THEME_KEY = 'tiny-pending-item:theme'
 const ACCENT_KEY = 'tiny-pending-item:accent'
+const VIEW_KEY = 'tiny-pending-item:view'
+
+export type ViewMode = 'list' | 'card'
+const VIEW_MODES: ViewMode[] = ['list', 'card']
 
 export interface AccentPreset {
   key: string
@@ -39,10 +43,17 @@ function persist(key: string, value: string): void {
 export const useThemeStore = defineStore('theme', () => {
   const dark = ref(readStored(THEME_KEY) === 'dark')
   const primary = ref(readStored(ACCENT_KEY) ?? 'green')
+  /** 待办展示形式：列表行 / 卡片网格，跨会话记忆 */
+  const viewMode = ref<ViewMode>(readStoredViewMode())
 
   const accent = computed(
     () => ACCENT_PRESETS.find((preset) => preset.key === primary.value) ?? ACCENT_PRESETS[0],
   )
+
+  function readStoredViewMode(): ViewMode {
+    const raw = readStored(VIEW_KEY)
+    return VIEW_MODES.includes(raw as ViewMode) ? (raw as ViewMode) : 'list'
+  }
 
   function toggle(): void {
     dark.value = !dark.value
@@ -54,5 +65,11 @@ export const useThemeStore = defineStore('theme', () => {
     persist(ACCENT_KEY, key)
   }
 
-  return { dark, toggle, primary, accent, setPrimary }
+  function setViewMode(mode: ViewMode): void {
+    if (viewMode.value === mode) return
+    viewMode.value = mode
+    persist(VIEW_KEY, mode)
+  }
+
+  return { dark, toggle, primary, accent, setPrimary, viewMode, setViewMode }
 })

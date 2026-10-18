@@ -1084,6 +1084,49 @@ body.dark .user-avatar {
   opacity: 0.5;
 }
 
+/* ===== 卡片视图 ===== */
+
+.item-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 12px;
+}
+
+.cards-grid .todo-item {
+  border: 1px solid var(--glass-border);
+  background: var(--glass-strong);
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 var(--glass-highlight), var(--shadow);
+  align-items: flex-start;
+}
+
+.cards-grid .todo-item .item-main {
+  flex: 1;
+}
+
+.cards-grid .todo-item .card-notes {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.cards-grid .todo-item .title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
 /* ===== 回收站 ===== */
 
 .trash-caption {

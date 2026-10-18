@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useMessage } from 'naive-ui'
 import { useAuthStore } from '../stores/auth'
-import { useThemeStore, ACCENT_PRESETS } from '../stores/theme'
+import { useThemeStore, ACCENT_PRESETS, type ViewMode } from '../stores/theme'
 import UserAvatar from './UserAvatar.vue'
 import { AVATAR_COLORS, AVATAR_EMOJIS, resolveAvatar, type AvatarSpec } from '../utils/avatar'
 
@@ -88,6 +88,21 @@ function pickColor(color: string): void {
             </template>
             {{ preset.label }}
           </n-tooltip>
+        </div>
+      </section>
+
+      <section>
+        <p class="settings-heading">列表样式</p>
+        <div class="appearance-row">
+          <span>{{ theme.viewMode === 'card' ? '当前：卡片网格' : '当前：列表行' }}</span>
+          <n-radio-group
+            :value="theme.viewMode"
+            size="small"
+            @update:value="theme.setViewMode($event as ViewMode)"
+          >
+            <n-radio-button value="list">列表</n-radio-button>
+            <n-radio-button value="card">卡片</n-radio-button>
+          </n-radio-group>
         </div>
       </section>
 
