@@ -560,3 +560,158 @@ describe('用户头像（本地存储）', () => {
     expect((await api.me()).user.avatar).toBe('')
   })
 })
+
+describe('回收站（软删除）', () => {
+  it('删除移入回收站：主列表消失，回收站按删除时间倒序可见', async () => {
+    await registerAndLogin('trash-a')
+    const first = await addItem('第一条')
+    await addItem('第二条')
+
+    await api.deleteItem(first.id)
+    expect((await api.listItems()).items.map((row) => row.title)).toEqual(['第二条'])
+
+    const { items: trash, autoPurged } = await api.listTrash()
+    expect(autoPurged).toBe(0)
+    expect(trash.map((row) => row.title)).toEqual(['第一条'])
+    expect(trash[0]!.deletedAt).toBeGreaterThan(0)
+  })
+
+  it('恢复后完整回到原域原位置（域/标签/置顶/明细不变）', async () => {
+    await registerAndLogin('trash-b')
+    const domains = (await api.listDomains()).domains
+    const item = await addItem('重要待办', {
+      domainId: domains[1]!.id,
+      priority: 'high',
+      tags: ['核心'],
+      notes: '不能丢的明细',
+    })
+    await api.updateItem(item.id, { pinned: true })
+
+    await api.deleteItem(item.id)
+    const restored = (await api.restoreItem(item.id)).item
+    expect(restored.deletedAt).toBeNull()
+    expect(restored.domainId).toBe(domains[1]!.id)
+    expect(restored.priority).toBe('high')
+    expect(restored.tags).toEqual(['核心'])
+    expect(restored.notes).toBe('不能丢的明细')
+    expect(restored.pinned).toBe(true)
+    expect(restored.doneAt).toBeNull()
+
+    expect((await api.listTrash()).items).toHaveLength(0)
+    expect((await api.listItems()).items.some((row) => row.id === item.id)).toBe(true)
+  })
+
+  it('已删除条目不可编辑/再次删除；恢复与彻底删除对不在回收站的条目返回 404', async () => {
+    await registerAndLogin('trash-c')
+    const item = await addItem('目标')
+    await api.deleteItem(item.id)
+
+    await expectApiError(api.updateItem(item.id, { title: '改名' }), 404, '条目不存在')
+    await expectApiError(api.deleteItem(item.id), 404, '条目不存在')
+    await expectApiError(api.restoreItem(item.id + 100), 404, '条目不在回收站')
+
+    const active = await addItem('未删除的')
+    await expectApiError(api.restoreItem(active.id), 404, '条目不在回收站')
+    await expectApiError(api.purgeItem(active.id), 404, '条目不在回收站')
+    await expectApiError(api.purgeItem(item.id + 100), 404, '条目不在回收站')
+  })
+
+  it('彻底删除与清空回收站', async () => {
+    await registerAndLogin('trash-d')
+    const a = await addItem('甲')
+    const b = await addItem('乙')
+    await api.deleteItem(a.id)
+    expect((await api.listTrash()).items.map((row) => row.title)).toEqual(['甲'])
+
+    await api.purgeItem(a.id)
+    expect((await api.listTrash()).items).toHaveLength(0)
+
+    // 乙、丙再进回收站后整批清空
+    const c = await addItem('丙')
+    await api.deleteItem(c.id)
+    await api.deleteItem(b.id)
+    expect((await api.emptyTrash()).purged).toBe(2)
+    expect((await api.listTrash()).items).toHaveLength(0)
+    expect((await api.listItems()).items).toHaveLength(0)
+  })
+
+  it('超过 30 天的回收站条目在打开时被惰性清理', async () => {
+    const user = await registerAndLogin('trash-expire')
+    const item = await addItem('过期条目')
+    const fresh = await addItem('新鲜条目')
+    await api.deleteItem(item.id)
+    await api.deleteItem(fresh.id)
+
+    // 手工把“过期条目”的删除时间改到 31 天前
+    const key = `tiny-pending-item:local:items:${user.id}`
+    const rows = JSON.parse(globalThis.localStorage.getItem(key) as string) as Array<{
+      id: number
+      deletedAt: number | null
+    }>
+    for (const row of rows) {
+      if (row.id === item.id) row.deletedAt = Date.now() - 31 * 86400000
+    }
+    globalThis.localStorage.setItem(key, JSON.stringify(rows))
+
+    const { items: trash, autoPurged } = await api.listTrash()
+    expect(autoPurged).toBe(1)
+    expect(trash.map((row) => row.title)).toEqual(['新鲜条目'])
+  })
+
+  it('一键清除已完成 = 整批移入回收站', async () => {
+    await registerAndLogin('trash-clear')
+    const item = await addItem('完成的')
+    await api.updateItem(item.id, { done: true })
+    await addItem('进行中的')
+
+    expect((await api.clearCompleted()).removed).toBe(1)
+    expect((await api.listItems()).items.map((row) => row.title)).toEqual(['进行中的'])
+    const trash = (await api.listTrash()).items
+    expect(trash.map((row) => row.title)).toEqual(['完成的'])
+    expect(trash[0]!.done).toBe(true)
+
+    // 恢复后仍是已完成状态
+    const restored = (await api.restoreItem(item.id)).item
+    expect(restored.done).toBe(true)
+  })
+
+  it('导出不含回收站条目；导入忽略删除标记', async () => {
+    await registerAndLogin('trash-exim')
+    await addItem('正常条目')
+    const trashed = await addItem('被删条目')
+    await api.deleteItem(trashed.id)
+
+    const payload = await api.exportItems()
+    expect(payload.items.map((row) => row.title)).toEqual(['正常条目'])
+    expect(JSON.stringify(payload)).not.toContain('被删条目')
+
+    await api.importItems([
+      { title: '导入的正常条目', createdAt: Date.now() + 2000 },
+      { title: '导入的已删条目', deletedAt: Date.now() - 86400000, createdAt: Date.now() + 1000 },
+    ])
+    const list = (await api.listItems()).items
+    // 按创建时间倒序融入：新在前；连同测试开始创建的“正常条目”共 3 条可见
+    expect(list.map((row) => row.title)).toEqual(['导入的正常条目', '导入的已删条目', '正常条目'])
+    expect(list.every((row) => row.deletedAt === null)).toBe(true)
+  })
+
+  it('回收站容量上限 500：移入第 501 条时最早的条目被物理清除', async () => {
+    await registerAndLogin('trash-cap')
+    const oldest = await addItem('最早删除的')
+    for (let i = 0; i < 500; i++) {
+      await addItem(`填充${i}`)
+    }
+    // 删除第 1 条，再删除其余 500 条 → 触发容量守卫
+    await api.deleteItem(oldest.id)
+    const rest = (await api.listItems()).items
+    expect(rest).toHaveLength(500)
+    for (const row of rest) {
+      await api.deleteItem(row.id)
+    }
+
+    const { items: trash } = await api.listTrash()
+    expect(trash).toHaveLength(500)
+    expect(trash.some((row) => row.title === '最早删除的')).toBe(false)
+    expect(trash.some((row) => row.title === '填充499')).toBe(true)
+  })
+})

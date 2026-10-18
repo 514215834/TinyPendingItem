@@ -31,6 +31,10 @@ const MAX_TAG_LENGTH = 20
 const MAX_IMPORT = 1000
 const MAX_DOMAIN_NAME = 10
 const MAX_DOMAINS = 20
+/** 回收站保留期：30 天，超期在打开回收站时惰性物理删除 */
+const TRASH_RETENTION = 30 * 86400000
+/** 回收站容量上限，超出时物理删除最早删除的条目 */
+const MAX_TRASH = 500
 
 interface LocalUser {
   id: number
@@ -250,6 +254,11 @@ function toLocalItemRow(value: unknown, userId: number): LocalItemRow | null {
     dueAt: validateDueAt(record.dueAt) ?? null,
     tags: validateTags(record.tags) ?? [],
     pinned: record.pinned === true,
+    // 旧档案没有该字段，按“未删除”处理
+    deletedAt:
+      typeof record.deletedAt === 'number' && Number.isFinite(record.deletedAt) && record.deletedAt > 0
+        ? Math.floor(record.deletedAt)
+        : null,
     sortOrder: typeof record.sortOrder === 'number' && Number.isFinite(record.sortOrder)
       ? record.sortOrder
       : 0,
@@ -341,6 +350,30 @@ function resolveDomainId(domains: LocalDomainRow[], value: unknown): number {
   throw new ApiError(400, '域不存在')
 }
 
+/** 惰性清理：物理删除超过保留期的回收站条目（原地修改 rows），返回清除条数 */
+function purgeExpiredTrash(rows: LocalItemRow[], now: number): number {
+  const before = rows.length
+  const keep = rows.filter(
+    (row) => row.deletedAt === null || now - row.deletedAt <= TRASH_RETENTION,
+  )
+  rows.length = 0
+  rows.push(...keep)
+  return before - keep.length
+}
+
+/** 容量守卫：回收站超出上限时物理删除最早删除的条目，返回清除条数 */
+function enforceTrashCap(rows: LocalItemRow[]): number {
+  const trashRows = rows.filter((row) => row.deletedAt !== null)
+  const overflow = trashRows.length - MAX_TRASH
+  if (overflow <= 0) return 0
+  const oldestFirst = [...trashRows].sort((a, b) => a.deletedAt! - b.deletedAt!)
+  const doomed = new Set(oldestFirst.slice(0, overflow).map((row) => row.id))
+  const keep = rows.filter((row) => !doomed.has(row.id))
+  rows.length = 0
+  rows.push(...keep)
+  return overflow
+}
+
 /** 与服务端 ORDER BY 一致：置顶 → sortOrder 升序 → id 倒序 */
 function sortRows(rows: LocalItemRow[]): LocalItemRow[] {
   return [...rows].sort((a, b) => {
@@ -348,6 +381,11 @@ function sortRows(rows: LocalItemRow[]): LocalItemRow[] {
     if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder
     return b.id - a.id
   })
+}
+
+/** 正常条目（未软删除） */
+function visibleRows(rows: LocalItemRow[]): LocalItemRow[] {
+  return rows.filter((row) => row.deletedAt === null)
 }
 
 function toItem(row: LocalItemRow): PendingItem {
@@ -364,6 +402,7 @@ function toItem(row: LocalItemRow): PendingItem {
     dueAt: row.dueAt,
     tags: [...row.tags],
     pinned: row.pinned,
+    deletedAt: row.deletedAt,
   }
 }
 
@@ -622,7 +661,8 @@ export const api = {
     if (domains.length === 1) {
       throw new ApiError(400, '至少保留一个域')
     }
-    const occupied = rows.filter((item) => item.domainId === id).length
+    // 仅统计可见条目：已在回收站的条目随恢复时归入其他域（loadUserData 自动归位）
+    const occupied = visibleRows(rows).filter((item) => item.domainId === id).length
     if (occupied > 0) {
       throw new ApiError(400, `该域下仍有 ${occupied} 条待办，请先移动或删除`)
     }
@@ -633,7 +673,7 @@ export const api = {
   async listItems(): Promise<{ items: PendingItem[] }> {
     const user = requireUser()
     const { rows } = loadUserData(user.id)
-    return { items: sortRows(rows).map(toItem) }
+    return { items: sortRows(visibleRows(rows)).map(toItem) }
   },
 
   async addItem(
@@ -665,6 +705,7 @@ export const api = {
       dueAt: validateDueAt(options.dueAt) ?? null,
       tags: validateTags(options.tags) ?? [],
       pinned: false,
+      deletedAt: null,
       sortOrder: -now, // 新条目排最前；置顶条目始终在列表头部
     }
     writeJson(itemsKey(user.id), [...rows, row])
@@ -674,7 +715,8 @@ export const api = {
   async updateItem(id: number, patch: ItemPatch): Promise<{ item: PendingItem }> {
     const user = requireUser()
     const { domains, rows } = loadUserData(user.id)
-    const row = rows.find((item) => item.id === id)
+    // 回收站条目不可编辑，与“列表不可见”语义一致
+    const row = rows.find((item) => item.id === id && item.deletedAt === null)
     if (!row) throw new ApiError(404, '条目不存在')
 
     const now = Date.now()
@@ -726,13 +768,58 @@ export const api = {
     return { item: toItem(row) }
   },
 
+  /** 软删除：移入回收站（保留 30 天，容量上限 500 条，超出时最早删除的条目被物理清除） */
   async deleteItem(id: number): Promise<void> {
     const user = requireUser()
-    const rows = readItems(user.id)
-    const index = rows.findIndex((item) => item.id === id)
-    if (index < 0) throw new ApiError(404, '条目不存在')
+    const { rows } = loadUserData(user.id)
+    const row = rows.find((item) => item.id === id && item.deletedAt === null)
+    if (!row) throw new ApiError(404, '条目不存在')
+    row.deletedAt = Date.now()
+    enforceTrashCap(rows)
+    writeJson(itemsKey(user.id), rows)
+  },
+
+  /** 回收站列表：按删除时间倒序；顺带惰性清理超期条目 */
+  async listTrash(): Promise<{ items: PendingItem[]; autoPurged: number }> {
+    const user = requireUser()
+    const { rows } = loadUserData(user.id)
+    const autoPurged = purgeExpiredTrash(rows, Date.now())
+    if (autoPurged > 0) writeJson(itemsKey(user.id), rows)
+    const trashRows = rows
+      .filter((row) => row.deletedAt !== null)
+      .sort((a, b) => (b.deletedAt as number) - (a.deletedAt as number))
+    return { items: trashRows.map(toItem), autoPurged }
+  },
+
+  /** 恢复：清掉删除标记，回到原域原排序位置 */
+  async restoreItem(id: number): Promise<{ item: PendingItem }> {
+    const user = requireUser()
+    const { rows } = loadUserData(user.id)
+    const row = rows.find((item) => item.id === id && item.deletedAt !== null)
+    if (!row) throw new ApiError(404, '条目不在回收站')
+    row.deletedAt = null
+    writeJson(itemsKey(user.id), rows)
+    return { item: toItem(row) }
+  },
+
+  /** 彻底删除单条（仅限回收站条目） */
+  async purgeItem(id: number): Promise<void> {
+    const user = requireUser()
+    const { rows } = loadUserData(user.id)
+    const index = rows.findIndex((item) => item.id === id && item.deletedAt !== null)
+    if (index < 0) throw new ApiError(404, '条目不在回收站')
     rows.splice(index, 1)
     writeJson(itemsKey(user.id), rows)
+  },
+
+  /** 清空回收站 */
+  async emptyTrash(): Promise<{ purged: number }> {
+    const user = requireUser()
+    const { rows } = loadUserData(user.id)
+    const kept = visibleRows(rows)
+    const purged = rows.length - kept.length
+    if (purged > 0) writeJson(itemsKey(user.id), kept)
+    return { purged }
   },
 
   async reorder(orderedIds: number[]): Promise<{ updated: number }> {
@@ -754,12 +841,23 @@ export const api = {
     return { updated: orderedIds.length }
   },
 
+  /** 一键清除已完成：整批移入回收站（可恢复） */
   async clearCompleted(): Promise<{ removed: number }> {
     const user = requireUser()
     const { rows } = loadUserData(user.id)
-    const kept = rows.filter((item) => !item.done)
-    writeJson(itemsKey(user.id), kept)
-    return { removed: rows.length - kept.length }
+    const now = Date.now()
+    let removed = 0
+    for (const row of rows) {
+      if (row.deletedAt === null && row.done) {
+        row.deletedAt = now
+        removed++
+      }
+    }
+    if (removed > 0) {
+      enforceTrashCap(rows)
+      writeJson(itemsKey(user.id), rows)
+    }
+    return { removed }
   },
 
   async exportItems(): Promise<ExportPayload> {
@@ -769,7 +867,8 @@ export const api = {
       app: 'tiny-pending-item',
       version: 1,
       exportedAt: Date.now(),
-      items: sortRows(rows).map(toItem),
+      // 导出仅含未删除条目：回收站属于临时区，不进入备份语义
+      items: sortRows(visibleRows(rows)).map(toItem),
       domains: sortDomainRows(domains).map(toDomain),
     }
   },
@@ -847,6 +946,8 @@ export const api = {
         dueAt: validateDueAt(record.dueAt) ?? null,
         tags: validateTags(record.tags) ?? [],
         pinned: record.pinned === true,
+        // 导入一律按未删除处理：文件中的删除标记被忽略
+        deletedAt: null,
         sortOrder: -createdAt, // 保持原创建时间语义：按“创建时间倒序”融入列表
       })
       imported++

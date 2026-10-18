@@ -37,6 +37,9 @@ export const useItemsStore = defineStore('items', () => {
   const search = ref('')
   const tagFilter = ref('')
   const selectedId = ref<number | null>(null)
+  /** 回收站：软删除条目（按删除时间倒序），trashView 时主列表区整体切换为回收站视图 */
+  const trash = ref<PendingItem[]>([])
+  const trashView = ref(false)
 
   /** 排序方式为跨会话偏好，变化时落盘 */
   watch(sortMode, (mode) => persistSortMode(mode))
@@ -123,6 +126,55 @@ export const useItemsStore = defineStore('items', () => {
       selectedId.value = null
     }
     items.value = items.value.filter((item) => item.id !== id)
+    void refreshTrash()
+  }
+
+  /** 打开回收站：拉取列表并惰性清理超期条目（autoPurged>0 时由调用方提示） */
+  async function loadTrash(): Promise<{ autoPurged: number }> {
+    const { items: trashItems, autoPurged } = await api.listTrash()
+    trash.value = trashItems
+    return { autoPurged }
+  }
+
+  /** 仅刷新回收站计数（软删除后侧栏角标即时更新） */
+  async function refreshTrash(): Promise<void> {
+    try {
+      trash.value = (await api.listTrash()).items
+    } catch {
+      // 计数刷新失败不打断主流程
+    }
+  }
+
+  /** 进入/退出回收站视图；列表由 TrashList 组件挂载时拉取 */
+  function toggleTrash(): void {
+    trashView.value = !trashView.value
+    if (trashView.value) {
+      selectedId.value = null
+    }
+  }
+
+  function exitTrash(): void {
+    trashView.value = false
+  }
+
+  /** 恢复到原域原位置 */
+  async function restoreFromTrash(id: number): Promise<void> {
+    const { item } = await api.restoreItem(id)
+    trash.value = trash.value.filter((row) => row.id !== id)
+    items.value.unshift(item)
+  }
+
+  /** 彻底删除单条 */
+  async function purgeFromTrash(id: number): Promise<void> {
+    await api.purgeItem(id)
+    trash.value = trash.value.filter((row) => row.id !== id)
+  }
+
+  /** 清空回收站，返回清除条数 */
+  async function emptyTrash(): Promise<number> {
+    const { purged } = await api.emptyTrash()
+    trash.value = []
+    return purged
   }
 
   /** 选中/再次点击取消选中，供明细面板使用 */
@@ -143,6 +195,7 @@ export const useItemsStore = defineStore('items', () => {
   async function clearCompleted(): Promise<number> {
     const { removed } = await api.clearCompleted()
     items.value = items.value.filter((item) => !item.done)
+    void refreshTrash()
     return removed
   }
 
@@ -162,6 +215,8 @@ export const useItemsStore = defineStore('items', () => {
     search.value = ''
     tagFilter.value = ''
     selectedId.value = null
+    trash.value = []
+    trashView.value = false
   }
 
   return {
@@ -172,6 +227,8 @@ export const useItemsStore = defineStore('items', () => {
     search,
     tagFilter,
     selectedId,
+    trash,
+    trashView,
     total,
     remaining,
     doneCount,
@@ -184,6 +241,13 @@ export const useItemsStore = defineStore('items', () => {
     toggle,
     togglePin,
     remove,
+    loadTrash,
+    refreshTrash,
+    toggleTrash,
+    exitTrash,
+    restoreFromTrash,
+    purgeFromTrash,
+    emptyTrash,
     reorder,
     clearCompleted,
     importItems,

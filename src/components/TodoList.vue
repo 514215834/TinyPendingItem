@@ -66,7 +66,7 @@ const emptyText = computed(() => {
 async function clearDone(): Promise<void> {
   try {
     const removed = await items.clearCompleted()
-    message.success(`已清除 ${removed} 条已完成待办`)
+    message.success(`已将 ${removed} 条已完成待办移入回收站`)
   } catch (error) {
     message.error(error instanceof Error ? error.message : '清除失败，请稍后再试')
   }

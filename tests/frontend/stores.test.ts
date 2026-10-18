@@ -17,6 +17,7 @@ vi.mock('../../src/api/client', () => {
     dueAt: number | null
     tags: string[]
     pinned: boolean
+    deletedAt: number | null
   }
 
   interface DomainRow {
@@ -79,7 +80,31 @@ vi.mock('../../src/api/client', () => {
         }
         domainRows.splice(index, 1)
       },
-      listItems: async () => ({ items: [...rows] }),
+      listItems: async () => ({ items: rows.filter((row) => row.deletedAt === null) }),
+      listTrash: async () => ({
+        items: rows
+          .filter((row) => row.deletedAt !== null)
+          .sort((a, b) => (b.deletedAt as number) - (a.deletedAt as number)),
+        autoPurged: 0,
+      }),
+      restoreItem: async (id: number) => {
+        const row = rows.find((item) => item.id === id && item.deletedAt !== null)
+        if (!row) throw new Error('条目不在回收站')
+        row.deletedAt = null
+        return { item: row }
+      },
+      purgeItem: async (id: number) => {
+        const index = rows.findIndex((item) => item.id === id && item.deletedAt !== null)
+        if (index < 0) throw new Error('条目不在回收站')
+        rows.splice(index, 1)
+      },
+      emptyTrash: async () => {
+        const before = rows.length
+        for (let i = rows.length - 1; i >= 0; i--) {
+          if (rows[i].deletedAt !== null) rows.splice(i, 1)
+        }
+        return { purged: before - rows.length }
+      },
       addItem: async (
         title: string,
         options: { domainId?: number; priority?: Priority; dueAt?: number | null; tags?: string[]; notes?: string } = {},
@@ -97,12 +122,13 @@ vi.mock('../../src/api/client', () => {
           dueAt: options.dueAt ?? null,
           tags: options.tags ?? [],
           pinned: false,
+          deletedAt: null,
         }
         rows.push(item)
         return { item }
       },
       updateItem: async (id: number, patch: Record<string, unknown>) => {
-        const item = rows.find((row) => row.id === id)
+        const item = rows.find((row) => row.id === id && row.deletedAt === null)
         if (!item) throw new Error('条目不存在')
         if (typeof patch.done === 'boolean') {
           item.done = patch.done
@@ -120,8 +146,9 @@ vi.mock('../../src/api/client', () => {
         return { item }
       },
       deleteItem: async (id: number) => {
-        const index = rows.findIndex((row) => row.id === id)
-        rows.splice(index, 1)
+        const row = rows.find((item) => item.id === id && item.deletedAt === null)
+        if (!row) throw new Error('条目不存在')
+        row.deletedAt = Date.now()
       },
       reorder: async (orderedIds: number[]) => {
         const byId = new Map(rows.map((row) => [row.id, row]))
@@ -135,11 +162,15 @@ vi.mock('../../src/api/client', () => {
         return { updated: orderedIds.length }
       },
       clearCompleted: async () => {
-        const before = rows.length
-        for (let i = rows.length - 1; i >= 0; i--) {
-          if (rows[i].done) rows.splice(i, 1)
+        const now = Date.now()
+        let removed = 0
+        for (const row of rows) {
+          if (row.deletedAt === null && row.done) {
+            row.deletedAt = now
+            removed++
+          }
         }
-        return { removed: before - rows.length }
+        return { removed }
       },
       exportItems: async () => ({
         app: 'tiny-pending-item',
@@ -167,9 +198,10 @@ vi.mock('../../src/api/client', () => {
             doneAt: null,
             priority: 'medium',
             dueAt: null,
-            tags: [],
-            pinned: false,
-          })
+          tags: [],
+          pinned: false,
+          deletedAt: null,
+        })
           imported++
         }
         return { imported, skipped }
@@ -518,5 +550,94 @@ describe('域 store 与条目的域过滤', () => {
 
     await store.add('默认归属')
     expect(store.items[0]?.domainId).toBe(1)
+  })
+})
+
+describe('回收站（软删除）', () => {
+  let storageMap: Map<string, string>
+
+  beforeEach(() => {
+    storageMap = new Map()
+    globalThis.localStorage = {
+      getItem: (key: string) => storageMap.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        storageMap.set(key, String(value))
+      },
+      removeItem: (key: string) => {
+        storageMap.delete(key)
+      },
+    } as unknown as Storage
+  })
+
+  afterEach(() => {
+    try {
+      delete (globalThis as { localStorage?: unknown }).localStorage
+    } catch {
+      // 非自有属性时忽略
+    }
+  })
+
+  it('删除后主列表/统计不再包含，回收站计数即时刷新，可恢复到原域', async () => {
+    const store = useItemsStore()
+    await store.add('要删的', { domainId: 2, tags: ['备用'] })
+    await store.add('留下的')
+    const doomed = store.items.find((item) => item.title === '要删的')
+    if (!doomed) throw new Error('待删条目不存在')
+
+    await store.remove(doomed.id)
+    expect(store.items.map((item) => item.title)).toEqual(['留下的'])
+    expect(store.total).toBe(1)
+    // 软删除后侧栏角标经 refreshTrash 即时更新（无需先打开回收站）
+    expect(store.trash.map((row) => row.title)).toEqual(['要删的'])
+    expect(store.trash[0]?.deletedAt).toBeGreaterThan(0)
+
+    await store.restoreFromTrash(doomed.id)
+    expect(store.trash).toHaveLength(0)
+    expect(store.items.some((item) => item.title === '要删的')).toBe(true)
+    const restored = store.items.find((item) => item.id === doomed.id)
+    expect(restored?.domainId).toBe(2)
+    expect(restored?.tags).toEqual(['备用'])
+  })
+
+  it('回收站视图切换：进入时清空选中，退出后回主列表', async () => {
+    const store = useItemsStore()
+    await store.add('甲')
+    store.select(store.items[0]!.id)
+    expect(store.selected).not.toBeNull()
+
+    store.toggleTrash()
+    expect(store.trashView).toBe(true)
+    expect(store.selected).toBeNull()
+
+    store.exitTrash()
+    expect(store.trashView).toBe(false)
+  })
+
+  it('彻底删除与清空回收站', async () => {
+    const store = useItemsStore()
+    await store.add('甲')
+    await store.add('乙')
+    await store.remove(store.items[0]!.id)
+    await store.remove(store.items[0]!.id)
+    await store.loadTrash()
+    expect(store.trash).toHaveLength(2)
+
+    await store.purgeFromTrash(store.trash[0]!.id)
+    expect(store.trash).toHaveLength(1)
+
+    const purged = await store.emptyTrash()
+    expect(purged).toBe(1)
+    expect(store.trash).toHaveLength(0)
+    await expect(store.restoreFromTrash(999)).rejects.toThrow('不在回收站')
+  })
+
+  it('已删除条目不可再编辑或再次删除', async () => {
+    const store = useItemsStore()
+    await store.add('目标')
+    const id = store.items[0]!.id
+    await store.remove(id)
+
+    await expect(store.update(id, { title: '改名' })).rejects.toThrow('条目不存在')
+    await expect(store.remove(id)).rejects.toThrow('条目不存在')
   })
 })

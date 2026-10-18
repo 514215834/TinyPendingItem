@@ -58,4 +58,6 @@ export interface PendingItem {
   dueAt: number | null
   tags: string[]
   pinned: boolean
+  /** 软删除时间：null=正常条目；非 null=位于回收站（保留 30 天，超期自动物理删除） */
+  deletedAt: number | null
 }

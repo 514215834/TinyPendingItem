@@ -96,6 +96,16 @@ function onDragEnd(): void {
   dragging.value = false
   emit('item-dragend')
 }
+
+/** 删除为软删除：移入回收站，30 天内可恢复 */
+async function onRemove(): Promise<void> {
+  try {
+    await items.remove(props.item.id)
+    message.success('已移入回收站，30 天内可恢复')
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '删除失败，请稍后再试')
+  }
+}
 </script>
 
 <template>
@@ -155,7 +165,7 @@ function onDragEnd(): void {
       </n-tooltip>
       <n-tooltip>
         <template #trigger>
-          <n-button quaternary circle size="tiny" type="error" @click="items.remove(item.id)">
+          <n-button quaternary circle size="tiny" type="error" @click="onRemove">
             <n-icon :component="TrashOutline" />
           </n-button>
         </template>

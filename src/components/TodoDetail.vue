@@ -81,7 +81,7 @@ async function removeItem(): Promise<void> {
   if (!sel) return
   try {
     await items.remove(sel.id)
-    message.success('待办已删除')
+    message.success('已移入回收站，30 天内可恢复')
   } catch (error) {
     message.error(error instanceof Error ? error.message : '删除失败，请稍后再试')
   }

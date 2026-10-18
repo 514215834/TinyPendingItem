@@ -15,6 +15,7 @@ import {
   SettingsOutline,
   SunnyOutline,
   TimeOutline,
+  TrashOutline,
 } from '@vicons/ionicons5'
 import { useAuthStore } from '../stores/auth'
 import { useItemsStore } from '../stores/items'
@@ -24,6 +25,7 @@ import { api } from '../api/client'
 import AddTodo from './AddTodo.vue'
 import TodoList from './TodoList.vue'
 import TodoDetail from './TodoDetail.vue'
+import TrashList from './TrashList.vue'
 import UserAvatar from './UserAvatar.vue'
 import SettingsDialog from './SettingsDialog.vue'
 import DomainsDialog from './DomainsDialog.vue'
@@ -53,6 +55,12 @@ onMounted(() => {
   domains.reset()
   void items.load()
   void domains.load()
+  // 回收站计数与超期条目惰性清理
+  void items.loadTrash().then(({ autoPurged }) => {
+    if (autoPurged > 0) {
+      message.info(`已自动清理 ${autoPurged} 条超过 30 天的回收站条目`)
+    }
+  }).catch(() => {})
   window.addEventListener('keydown', onKeydown)
 })
 
@@ -60,10 +68,11 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
 })
 
-/** 全局快捷键：N 新建 · 1/2/3 筛选 · / 搜索 · Esc 关闭明细；其余快捷键在输入框聚焦时不响应 */
+/** 全局快捷键：N 新建 · 1/2/3 筛选 · / 搜索 · Esc 关闭明细/退出回收站；其余快捷键在输入框聚焦时不响应 */
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     items.closeDetail()
+    items.exitTrash()
     return
   }
   const target = event.target as HTMLElement | null
@@ -79,14 +88,23 @@ function onKeydown(event: KeyboardEvent): void {
     event.preventDefault()
     document.querySelector<HTMLInputElement>('#search-input input')?.focus()
   } else if (event.key === '1') {
-    items.filter = 'all'
+    setStatus('all')
   } else if (event.key === '2') {
-    items.filter = 'active'
+    setStatus('active')
   } else if (event.key === '3') {
-    items.filter = 'done'
-  } else if (event.key === 'Escape') {
-    items.closeDetail()
+    setStatus('done')
   }
+}
+
+/** 状态筛选与域选择互斥于回收站视图：切换任一即退出回收站 */
+function setStatus(value: string): void {
+  items.filter = value
+  items.exitTrash()
+}
+
+function setDomain(id: number | null): void {
+  domains.activeId = id
+  items.exitTrash()
 }
 
 async function exportJson(): Promise<void> {
@@ -164,17 +182,21 @@ async function onImportFile(event: Event): Promise<void> {
       </div>
 
       <nav class="side-nav">
-        <button class="nav-item" :class="{ active: items.filter === 'all' }" @click="items.filter = 'all'">
+        <button class="nav-item" :class="{ active: items.filter === 'all' && !items.trashView }" @click="setStatus('all')">
           <span class="nav-label"><n-icon :component="ReorderFourOutline" />全部</span>
           <span class="nav-count">{{ items.total }}</span>
         </button>
-        <button class="nav-item" :class="{ active: items.filter === 'active' }" @click="items.filter = 'active'">
+        <button class="nav-item" :class="{ active: items.filter === 'active' && !items.trashView }" @click="setStatus('active')">
           <span class="nav-label"><n-icon :component="TimeOutline" />进行中</span>
           <span class="nav-count">{{ items.remaining }}</span>
         </button>
-        <button class="nav-item" :class="{ active: items.filter === 'done' }" @click="items.filter = 'done'">
+        <button class="nav-item" :class="{ active: items.filter === 'done' && !items.trashView }" @click="setStatus('done')">
           <span class="nav-label"><n-icon :component="CheckmarkCircleOutline" />已完成</span>
           <span class="nav-count">{{ items.doneCount }}</span>
+        </button>
+        <button class="nav-item side-trash" :class="{ active: items.trashView }" @click="items.toggleTrash()">
+          <span class="nav-label"><n-icon :component="TrashOutline" />回收站</span>
+          <span class="nav-count">{{ items.trash.length }}</span>
         </button>
       </nav>
 
@@ -186,7 +208,7 @@ async function onImportFile(event: Event): Promise<void> {
           </button>
         </p>
         <nav class="side-nav">
-          <button class="nav-item" :class="{ active: domains.activeId === null }" @click="domains.activeId = null">
+          <button class="nav-item" :class="{ active: domains.activeId === null && !items.trashView }" @click="setDomain(null)">
             <span class="nav-label"><n-icon :component="AppsOutline" />全部域</span>
             <span class="nav-count">{{ items.items.length }}</span>
           </button>
@@ -194,8 +216,8 @@ async function onImportFile(event: Event): Promise<void> {
             v-for="domain in domains.list"
             :key="domain.id"
             class="nav-item"
-            :class="{ active: domains.activeId === domain.id }"
-            @click="domains.activeId = domain.id"
+            :class="{ active: domains.activeId === domain.id && !items.trashView }"
+            @click="setDomain(domain.id)"
           >
             <span class="nav-label"><span class="domain-emoji">{{ domain.emoji }}</span>{{ domain.name }}</span>
             <span class="nav-count">{{ domainCounts[domain.id] ?? 0 }}</span>
@@ -281,11 +303,14 @@ async function onImportFile(event: Event): Promise<void> {
     <main class="main">
       <div class="main-inner">
         <div class="list-column">
-          <AddTodo ref="addTodoRef" />
-          <TodoList />
-          <p class="shortcut-hint">快捷键：N 新建 · 1/2/3 切换筛选 · / 搜索 · 双击编辑 · Esc 关闭明细</p>
+          <template v-if="!items.trashView">
+            <AddTodo ref="addTodoRef" />
+            <TodoList />
+            <p class="shortcut-hint">快捷键：N 新建 · 1/2/3 切换筛选 · / 搜索 · 双击编辑 · Esc 关闭明细</p>
+          </template>
+          <TrashList v-else />
         </div>
-        <TodoDetail />
+        <TodoDetail v-if="!items.trashView" />
       </div>
     </main>
   </div>
