@@ -1096,6 +1096,8 @@ body.dark .user-avatar {
 .cards-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  /* 容器高度不定时，1fr 行统一取最高一行的高度，使所有卡片等高 */
+  grid-auto-rows: 1fr;
   gap: 12px;
 }
 
@@ -1105,10 +1107,20 @@ body.dark .user-avatar {
   border-radius: 14px;
   box-shadow: inset 0 1px 0 var(--glass-highlight), var(--shadow);
   align-items: flex-start;
+  margin-bottom: 0; /* 列表视图的行距在网格内由 gap 负责 */
 }
 
 .cards-grid .todo-item .item-main {
   flex: 1;
+  /* 纵向撑满卡片，让底部的元信息行贴住卡片下缘 */
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+}
+
+.cards-grid .todo-item .meta {
+  margin-top: auto;
+  padding-top: 6px;
 }
 
 .cards-grid .todo-item .card-notes {
@@ -1125,6 +1137,11 @@ body.dark .user-avatar {
 .cards-grid .todo-item .title {
   font-size: 15px;
   font-weight: 600;
+  /* 超长标题限两行，避免单条内容把所有等高卡片撑得过高 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* ===== 回收站 ===== */
